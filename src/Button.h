@@ -9,9 +9,9 @@
 #include "WProgram.h"
 #endif
 
-enum ButtonType {
-	NORMAL,
-	PULLUP
+enum ButtonInputMode {
+    BTN_NORMAL,
+    BTN_PULLUP
 };
 
 class classButton {
@@ -24,10 +24,9 @@ private:
 	bool State;
 
 public:
-	classButton(int _Pin, ButtonType _Tipo);
+    classButton(int _Pin, ButtonInputMode _Tipo);
 	bool Pressed();
 	void Update();
 };
 
 #endif
-

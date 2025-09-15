@@ -1,6 +1,6 @@
 #include "Button.h"
 
-classButton::classButton(int _Pin, ButtonType _Tipo) {
+classButton::classButton(int _Pin, ButtonInputMode _Tipo) {
 	lastDebounceTime = 0;
 	debounceDelay = 250;
 	buttonState = false;
@@ -8,17 +8,17 @@ classButton::classButton(int _Pin, ButtonType _Tipo) {
 	State = false;
 	Pin = _Pin;
 
-	switch (_Tipo)
-	{
-	case ButtonType::NORMAL:
-		pinMode(Pin, INPUT);
-		break;
-	case ButtonType::PULLUP:
-		pinMode(Pin, INPUT_PULLUP);
-		break;
-	default:
-		break;
-	}
+    switch (_Tipo)
+    {
+    case ButtonInputMode::BTN_NORMAL:
+        pinMode(Pin, INPUT);
+        break;
+    case ButtonInputMode::BTN_PULLUP:
+        pinMode(Pin, INPUT_PULLUP);
+        break;
+    default:
+        break;
+    }
 }
 
 bool classButton::Pressed() {

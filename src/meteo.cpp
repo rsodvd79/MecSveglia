@@ -3,7 +3,11 @@
 // 
 
 #include "meteo.h"
+#if defined(ESP8266)
 #include <ESP8266HTTPClient.h>
+#else
+#include <HTTPClient.h>
+#endif
 #include <ArduinoJson.h>
 
 classMeteo::classMeteo() {

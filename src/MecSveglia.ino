@@ -22,23 +22,36 @@
   - CPU Frequency: "80 MHz"
 */
 
+#if defined(ESP8266)
 #include <coredecls.h>                  // settimeofday_cb()
 #include <PolledTimeout.h>
-#include <time.h>                       // time() ctime()
-#include <sys/time.h>                   // struct timeval
 #include <TZ.h>
 #include <ESP8266WiFi.h>
-#include <WiFiClient.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
+#include <LittleFS.h>
+#else
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
+#include <SPIFFS.h>
+#include <esp_sntp.h>
+#endif
+#include <WiFiClient.h>
+#include <time.h>                       // time() ctime()
+#include <sys/time.h>                   // struct timeval
 #include <SPI.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #define SSD1306_NO_SPLASH
 #include <Adafruit_SSD1306.h>
 #include <ArduinoOTA.h>
-#include <LittleFS.h> // LittleFS is declared
 #include <math.h>
+
+// Map LittleFS alias to SPIFFS on ESP32 (partition is 'spiffs')
+#if defined(ESP32)
+#define LittleFS SPIFFS
+#endif
 #include "eyes.h"
 #include "meteo.h"
 #include "Button.h"
@@ -53,6 +66,24 @@ String mdns_name = "FURGONE";
 
 static timeval tv;
 static time_t xnow;
+
+// Portable periodic timer with ESP8266-like API on ESP32
+#if !defined(ESP8266)
+namespace esp8266 { namespace polledTimeout {
+class periodicMs {
+public:
+  explicit periodicMs(uint32_t period) : period_(period), last_(0) {}
+  operator bool() {
+    unsigned long now = millis();
+    if (now - last_ >= period_) { last_ = now; return true; }
+    return false;
+  }
+private:
+  uint32_t period_;
+  unsigned long last_;
+};
+}}
+#endif
 
 static esp8266::polledTimeout::periodicMs showTimeNow(250);
 static esp8266::polledTimeout::periodicMs showSTimeNow(500);
@@ -69,9 +100,13 @@ static bool time_machine_running = false;
 static bool tsep = true;
 //static bool keyp = false;
 
+#if defined(ESP8266)
 ESP8266WebServer server(80);
+#else
+WebServer server(80);
+#endif
 classEye eye = classEye();
-classButton Bottone = classButton(12, ButtonType::PULLUP);
+classButton Bottone = classButton(12, ButtonInputMode::BTN_PULLUP);
 classMeteo meteo = classMeteo();
 classScreen screen = classScreen(6);
 bool CicloScreen = false;
@@ -920,11 +955,19 @@ void setup(void) {
     ArduinoOTA.setHostname(mdns_name.c_str());
     ArduinoOTA.begin();
 
+#if defined(ESP8266)
 	configTime(TZ_Europe_Rome, "pool.ntp.org");
 	time_t rtc = 0;
 	timeval tv = { rtc, 0 };
 	settimeofday(&tv, nullptr);
 	settimeofday_cb(time_is_set_scheduled);
+#else
+    // ESP32: set timezone (Europe/Rome) and start SNTP
+    setenv("TZ", "CET-1CEST,M3.5.0/2,M10.5.0/3", 1);
+    tzset();
+    configTime(0, 0, "pool.ntp.org");
+    sntp_set_time_sync_notification_cb([](struct timeval* tv){ (void)tv; time_is_set_scheduled(); });
+#endif
 
 	delay(500);
 
@@ -933,9 +976,12 @@ void setup(void) {
 void loop(void) {
     ArduinoOTA.handle();
     server.handleClient();
+    // mDNS upkeep (only required on ESP8266)
+#if defined(ESP8266)
     if (mdnsStarted) {
         MDNS.update();
     }
+#endif
     Bottone.Update();
 
     // Periodic brightness adjustment based on local time (night dim)
@@ -1078,8 +1124,13 @@ void handleStatus() {
     IPAddress ip = WiFi.localIP();
     int rssi = WiFi.RSSI();
     int qual = dBmtoPercentage(rssi);
+#if defined(ESP8266)
     WiFiMode_t mode = WiFi.getMode();
     bool apMode = (mode == WIFI_AP || mode == WIFI_AP_STA);
+#else
+    auto mode = WiFi.getMode();
+    bool apMode = (mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA);
+#endif
     IPAddress apIP = WiFi.softAPIP();
     String json = F("{");
     json += F("\"ip\":\""); json += ip.toString(); json += F("\",");
