@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FURGONE • Controller</title>
+  <link rel="icon" href="/favicon.ico" type="image/x-icon" />
+  <style>
+    :root {
+      --bg: #0f172a; /* slate-900 */
+      --panel: #111827; /* gray-900 */
+      --text: #e5e7eb; /* gray-200 */
+      --muted: #9ca3af; /* gray-400 */
+      --accent: #22c55e; /* green-500 */
+      --accent-dim: #16a34a; /* green-600 */
+      --warn: #f59e0b; /* amber-500 */
+      --error: #ef4444; /* red-500 */
+    }
+    * { box-sizing: border-box; }
+    html, body { margin:0; padding:0; background:var(--bg); color:var(--text); font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', Arial, 'Noto Sans', 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol'; }
+    .wrap { max-width: 720px; margin: 0 auto; padding: 24px 16px; }
+    header { margin-bottom: 16px; }
+    h1 { font-size: 20px; margin: 0 0 4px 0; }
+    p { margin: 0; color: var(--muted); }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
+    @media (min-width: 460px) { .grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+    button { appearance: none; border: 0; border-radius: 10px; padding: 14px 12px; font-size: 15px; font-weight: 600; color: #0b0f19; background: #e2e8f0; cursor: pointer; transition: transform .06s ease, opacity .2s ease; }
+    button:hover { transform: translateY(-1px); }
+    button:active { transform: translateY(0); }
+    button.primary { background: var(--accent); color: #052e16; }
+    button[disabled] { opacity: .6; cursor: not-allowed; }
+    .card { background: var(--panel); border: 1px solid #1f2937; padding: 16px; border-radius: 12px; margin-top: 16px; }
+    .status { margin-top: 12px; font-size: 14px; min-height: 1.4em; }
+    .ok { color: var(--accent); }
+    .fail { color: var(--error); }
+    footer { margin-top: 20px; color: var(--muted); font-size: 12px; }
+    a { color: #93c5fd; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>FURGONE • Controller</h1>
+      <p>Seleziona la schermata sul display OLED.</p>
+    </header>
+
+    <div class="card">
+      <div class="grid">
+        <button class="primary" data-endpoint="wifi">Wi‑Fi</button>
+        <button class="primary" data-endpoint="time">Ora/Data</button>
+        <button class="primary" data-endpoint="eyes">Eyes</button>
+        <button class="primary" data-endpoint="meteo">Meteo</button>
+        <button class="primary" data-endpoint="gol">Game of Life</button>
+        <button class="primary" data-endpoint="tri">Triangolo</button>
+        <button class="primary" data-endpoint="cycle">Ciclo schermi</button>
+        <button class="primary" id="btn-setup" title="Configura la rete Wi‑Fi">Setup Wi‑Fi</button>
+      </div>
+      <div id="status" class="status" aria-live="polite"></div>
+    </div>
+
+    <div class="card" id="info-card">
+      <strong>Stato dispositivo</strong>
+      <div class="grid" style="grid-template-columns: repeat(4, minmax(0,1fr)); margin-top:8px;">
+        <div>
+          <div class="muted">IP</div>
+          <code id="ip">—</code>
+        </div>
+        <div>
+          <div class="muted">mDNS</div>
+          <code id="mdns">—</code>
+        </div>
+        <div>
+          <div class="muted">RSSI</div>
+          <code id="rssi">—</code>
+        </div>
+        <div>
+          <div class="muted">Mode</div>
+          <code id="mode">—</code>
+        </div>
+      </div>
+      <div class="status" id="info-status"></div>
+    </div>
+
+    <div class="card">
+      <strong>OLED (anteprima)</strong>
+      <div style="margin-top:8px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+        <canvas id="oled" width="128" height="32" style="background:#000; border-radius:6px; image-rendering: pixelated; width:512px; height:128px; border:1px solid #1f2937;"></canvas>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <button id="refresh-oled">Aggiorna OLED</button>
+          <label style="display:flex; align-items:center; gap:6px;">
+            <input type="checkbox" id="auto-oled" /> Auto 2s
+          </label>
+        </div>
+      </div>
+      <div class="status" id="oled-status"></div>
+    </div>
+
+    <footer>
+      <div>mDNS configurato? Prova: <code>http://furgone.local/</code> (se il nome coincide).</div>
+      <div>Questa pagina è statica e invia richieste GET agli endpoint del dispositivo.</div>
+    </footer>
+  </div>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const infoStatus = document.getElementById('info-status');
+    const ipEl = document.getElementById('ip');
+    const mdnsEl = document.getElementById('mdns');
+    const rssiEl = document.getElementById('rssi');
+    const modeEl = document.getElementById('mode');
+    const oledCanvas = document.getElementById('oled');
+    const oledCtx = oledCanvas.getContext('2d');
+    const oledStatus = document.getElementById('oled-status');
+    const autoOled = document.getElementById('auto-oled');
+    const refreshOledBtn = document.getElementById('refresh-oled');
+
+    function setStatus(msg, ok=true) {
+      statusEl.className = 'status ' + (ok ? 'ok' : 'fail');
+      statusEl.textContent = msg;
+    }
+
+    async function callEndpoint(path) {
+      try {
+        setStatus('Invio richiesta…');
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 4000);
+        const res = await fetch('/' + path, { method: 'GET', signal: ctrl.signal, cache: 'no-store' });
+        clearTimeout(t);
+        if (res.ok) {
+          setStatus('OK: ' + path.toUpperCase());
+        } else {
+          setStatus('Errore ' + res.status + ' su ' + path, false);
+        }
+      } catch (e) {
+        setStatus('Richiesta fallita: ' + (e.name || 'errore'), false);
+      }
+    }
+
+    async function refreshInfo() {
+      try {
+        infoStatus.className = 'status';
+        infoStatus.textContent = 'Aggiornamento stato…';
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 4000);
+        const res = await fetch('/status', { cache: 'no-store', signal: ctrl.signal });
+        clearTimeout(t);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const j = await res.json();
+        ipEl.textContent = (j.mode === 'AP' ? (j.ap_ip || j.ip) : j.ip) || '—';
+        mdnsEl.textContent = j.mdns || '—';
+        rssiEl.textContent = (j.rssi !== undefined ? j.rssi + ' dBm (' + (j.quality||0) + '%)' : '—');
+        modeEl.textContent = j.mode || '—';
+        infoStatus.className = 'status ok';
+        infoStatus.textContent = 'Stato aggiornato';
+      } catch (e) {
+        infoStatus.className = 'status fail';
+        infoStatus.textContent = 'Impossibile leggere stato: ' + (e.message || 'errore');
+      }
+    }
+
+    function disableButtons(disabled) {
+      document.querySelectorAll('button[data-endpoint]').forEach(b => b.disabled = disabled);
+    }
+
+    document.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('button[data-endpoint]');
+      if (!btn) return;
+      const ep = btn.getAttribute('data-endpoint');
+      disableButtons(true);
+      callEndpoint(ep).finally(() => disableButtons(false));
+    });
+
+    // aggiorna lo stato all'avvio e ogni 30s
+    refreshInfo();
+    setInterval(refreshInfo, 30000);
+    document.getElementById('btn-setup').addEventListener('click', () => { location.href = '/setup'; });
+
+    function hexToBytes(hex) {
+      const len = hex.length / 2;
+      const out = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        out[i] = parseInt(hex.substr(i*2, 2), 16);
+      }
+      return out;
+    }
+
+    async function refreshOLED() {
+      try {
+        oledStatus.className = 'status';
+        oledStatus.textContent = 'Aggiorno OLED…';
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 4000);
+        const res = await fetch('/oled', { cache: 'no-store', signal: ctrl.signal });
+        clearTimeout(t);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const j = await res.json();
+        const w = j.w, h = j.h;
+        const buf = hexToBytes(j.data);
+        const pages = Math.ceil(h/8);
+        const img = oledCtx.createImageData(w, h);
+        const data = img.data;
+        for (let y = 0; y < h; y++) {
+          const page = y >> 3;
+          const bit = y & 7;
+          const rowOff = page * w;
+          for (let x = 0; x < w; x++) {
+            const b = buf[rowOff + x];
+            const on = (b >> bit) & 1;
+            const idx = (y * w + x) * 4;
+            const c = on ? 255 : 0;
+            data[idx] = c;
+            data[idx+1] = c;
+            data[idx+2] = c;
+            data[idx+3] = 255;
+          }
+        }
+        oledCtx.putImageData(img, 0, 0);
+        oledStatus.className = 'status ok';
+        oledStatus.textContent = 'OLED aggiornato';
+      } catch (e) {
+        oledStatus.className = 'status fail';
+        oledStatus.textContent = 'Impossibile aggiornare OLED: ' + (e.message || 'errore');
+      }
+    }
+
+    refreshOledBtn.addEventListener('click', refreshOLED);
+    let oledTimer = null;
+    autoOled.addEventListener('change', () => {
+      if (autoOled.checked) {
+        refreshOLED();
+        oledTimer = setInterval(refreshOLED, 2000);
+      } else if (oledTimer) {
+        clearInterval(oledTimer);
+        oledTimer = null;
+      }
+    });
+  </script>
+</body>
+</html>
