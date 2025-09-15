@@ -1,42 +1,9 @@
-/*
-  Furgone - ESP8266 with OLED display and web server
-  - Board: "Generic ESP8266 Module"
-  - Framework: "Arduino"
-  - Crystal Frequency: "26 MHz"
-  - Debug port: "Disabled"
-  - Flash Size: "1MB (FS:512KB OTA :~ 246KB)"
-  - C++ Exceptions: "Disabled (new aborts on oom)"
-  - Flash Frequency: "40MHz"
-  - Flash Mode: "DOUT (compatible)"
-  - IwlP Variant: "v2 Lower Memory"
-  - Builtin Led: "2"
-  - Debug Level: "None"
-  - MMU: "32KB cache + 32KB IRAM (balanced)"
-  - Non-32-Bit Access: "Use pgm_read macros for IRAM/PROGMEM"
-  - Reset Method: "dtr (aka nodemcu)"
-  - NONOS SDK Version: "nonos-sdk 2.2.1+100 (190703)"
-  - SSL Support: "All SSL ciphers (most compatible)"
-  - Stack Protection: "Disabled"
-  - VTables: "Flash"
-  - Erase Flash: "Only Sketch"
-  - CPU Frequency: "80 MHz"
-*/
-
-#if defined(ESP8266)
-#include <coredecls.h>                  // settimeofday_cb()
-#include <PolledTimeout.h>
-#include <TZ.h>
-#include <ESP8266WiFi.h>
-#include <ESP8266WebServer.h>
-#include <ESP8266mDNS.h>
-#include <LittleFS.h>
-#else
+#include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <SPIFFS.h>
 #include <esp_sntp.h>
-#endif
 #include <WiFiClient.h>
 #include <time.h>                       // time() ctime()
 #include <sys/time.h>                   // struct timeval
@@ -62,7 +29,7 @@ Adafruit_SSD1306 display(128, 32, &Wire, -1);
 
 String ssid = "";
 String password = "";
-String mdns_name = "FURGONE";
+String mdns_name = "MECSVEGLIA";
 
 static timeval tv;
 static time_t xnow;
@@ -100,11 +67,7 @@ static bool time_machine_running = false;
 static bool tsep = true;
 //static bool keyp = false;
 
-#if defined(ESP8266)
-ESP8266WebServer server(80);
-#else
 WebServer server(80);
-#endif
 classEye eye = classEye();
 classButton Bottone = classButton(12, ButtonInputMode::BTN_PULLUP);
 classMeteo meteo = classMeteo();

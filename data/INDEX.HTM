@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>FURGONE • Controller</title>
+  <title>mdns • Controller</title>
   <link rel="icon" href="/favicon.ico" type="image/x-icon" />
   <style>
     :root {
@@ -41,7 +41,7 @@
 <body>
   <div class="wrap">
     <header>
-      <h1>FURGONE • Controller</h1>
+      <h1>Controller</h1>
       <p>Seleziona la schermata sul display OLED.</p>
     </header>
 
@@ -89,7 +89,7 @@
         <div style="display:flex; gap:8px; align-items:center;">
           <button id="refresh-oled">Aggiorna OLED</button>
           <label style="display:flex; align-items:center; gap:6px;">
-            <input type="checkbox" id="auto-oled" /> Auto 2s
+            <input type="checkbox" id="auto-oled" /> Auto 0.5s
           </label>
         </div>
       </div>
@@ -97,7 +97,7 @@
     </div>
 
     <footer>
-      <div>mDNS configurato? Prova: <code>http://furgone.local/</code> (se il nome coincide).</div>
+      <div>mDNS configurato? Prova: <code>http://mdns.local/</code> (se il nome coincide).</div>
       <div>Questa pagina è statica e invia richieste GET agli endpoint del dispositivo.</div>
     </footer>
   </div>
@@ -229,7 +229,7 @@
     autoOled.addEventListener('change', () => {
       if (autoOled.checked) {
         refreshOLED();
-        oledTimer = setInterval(refreshOLED, 2000);
+        oledTimer = setInterval(refreshOLED, 500);
       } else if (oledTimer) {
         clearInterval(oledTimer);
         oledTimer = null;
