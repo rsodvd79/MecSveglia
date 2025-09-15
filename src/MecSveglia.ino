@@ -92,6 +92,25 @@ void handleRoot() {
 		if (fhtm) {
 			String message = fhtm.readString();
 			fhtm.close();
+
+			// Sostituzione dinamica di "mdns" con il contenuto di mdns_nm.txt / MDNS_NM.TXT
+			String mdnsPath = "/mdns_nm.txt";
+			if (!LittleFS.exists(mdnsPath)) mdnsPath = "/MDNS_NM.TXT";
+			if (LittleFS.exists(mdnsPath)) {
+				File fmdns = LittleFS.open(mdnsPath, "r");
+				if (fmdns) {
+					String mdnsFile = fmdns.readString();
+					mdnsFile.trim();
+					if (mdnsFile.length()) {
+						mdns_name = mdnsFile;
+					}
+					fmdns.close();
+				}
+			}
+			if (mdns_name.length()) {
+				message.replace("__MDNS__", mdns_name);
+			}
+
 			server.send(200, F("text/html"), message);
 			digitalWrite(LED_BUILTIN, HIGH);
 			return;
