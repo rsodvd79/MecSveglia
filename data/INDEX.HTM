@@ -29,6 +29,11 @@
     button:active { transform: translateY(0); }
     button.primary { background: var(--accent); color: #052e16; }
     button[disabled] { opacity: .6; cursor: not-allowed; }
+    form { margin: 0; }
+    label { display: block; margin-top: 12px; font-size: 13px; color: var(--muted); }
+    input[type="text"] { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid #1f2937; background: #0b1220; color: var(--text); font-size: 15px; }
+    .form-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+    .form-row .status { margin-top: 0; }
     .card { background: var(--panel); border: 1px solid #1f2937; padding: 16px; border-radius: 12px; margin-top: 16px; }
     .status { margin-top: 12px; font-size: 14px; min-height: 1.4em; }
     .ok { color: var(--accent); }
@@ -83,6 +88,19 @@
     </div>
 
     <div class="card">
+      <strong>Fuso orario</strong>
+      <form id="tz-form" autocomplete="off">
+        <label for="tz-input">Stringa POSIX (esempio: CET-1CEST,M3.5.0/2,M10.5.0/3)</label>
+        <input id="tz-input" name="tz" type="text" placeholder="CET-1CEST,M3.5.0/2,M10.5.0/3" />
+        <div class="form-row">
+          <button type="submit" class="primary">Salva fuso</button>
+          <span id="tz-status" class="status" aria-live="polite"></span>
+        </div>
+      </form>
+      <p style="margin-top:8px; font-size:12px; color:var(--muted);">Lascia vuoto per ripristinare il valore predefinito.</p>
+    </div>
+
+    <div class="card">
       <strong>OLED (anteprima)</strong>
       <div style="margin-top:8px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
         <canvas id="oled" width="128" height="32" style="background:#000; border-radius:6px; image-rendering: pixelated; width:512px; height:128px; border:1px solid #1f2937;"></canvas>
@@ -114,6 +132,9 @@
     const oledStatus = document.getElementById('oled-status');
     const autoOled = document.getElementById('auto-oled');
     const refreshOledBtn = document.getElementById('refresh-oled');
+    const tzForm = document.getElementById('tz-form');
+    const tzInput = document.getElementById('tz-input');
+    const tzStatus = document.getElementById('tz-status');
 
     function setStatus(msg, ok=true) {
       statusEl.className = 'status ' + (ok ? 'ok' : 'fail');
@@ -163,6 +184,33 @@
       document.querySelectorAll('button[data-endpoint]').forEach(b => b.disabled = disabled);
     }
 
+    function setTzStatus(msg, state = null) {
+      if (!tzStatus) return;
+      if (state === null) {
+        tzStatus.className = 'status';
+      } else {
+        tzStatus.className = 'status ' + (state ? 'ok' : 'fail');
+      }
+      tzStatus.textContent = msg;
+    }
+
+    async function loadTimezone() {
+      if (!tzInput) return;
+      try {
+        setTzStatus('Lettura fuso…');
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 4000);
+        const res = await fetch('/timezone', { cache: 'no-store', signal: ctrl.signal });
+        clearTimeout(t);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const j = await res.json();
+        tzInput.value = (j && j.tz) ? j.tz : '';
+        setTzStatus('Fuso attuale caricato', true);
+      } catch (e) {
+        setTzStatus('Impossibile leggere fuso: ' + (e.message || 'errore'), false);
+      }
+    }
+
     document.addEventListener('click', (ev) => {
       const btn = ev.target.closest('button[data-endpoint]');
       if (!btn) return;
@@ -175,6 +223,48 @@
     refreshInfo();
     setInterval(refreshInfo, 30000);
     document.getElementById('btn-setup').addEventListener('click', () => { location.href = '/setup'; });
+
+    if (tzForm) {
+      tzForm.addEventListener('submit', async (ev) => {
+        ev.preventDefault();
+        const tzValue = tzInput ? tzInput.value.trim() : '';
+        try {
+          setTzStatus('Salvataggio…');
+          const body = new URLSearchParams();
+          body.append('tz', tzValue);
+          const ctrl = new AbortController();
+          const t = setTimeout(() => ctrl.abort(), 4000);
+          const res = await fetch('/timezone', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: body.toString(),
+            signal: ctrl.signal,
+          });
+          clearTimeout(t);
+          if (!res.ok) {
+            const txt = await res.text();
+            throw new Error(txt || ('HTTP ' + res.status));
+          }
+          let newTz = tzValue;
+          const ct = res.headers.get('content-type') || '';
+          if (ct.includes('application/json')) {
+            const data = await res.json();
+            if (data && typeof data.tz === 'string') {
+              newTz = data.tz;
+            }
+          } else {
+            const txt = await res.text();
+            if (txt.trim().length) newTz = txt.trim();
+          }
+          if (tzInput) tzInput.value = newTz;
+          setTzStatus('Fuso aggiornato', true);
+        } catch (e) {
+          setTzStatus('Errore salvataggio: ' + (e.message || 'errore'), false);
+        }
+      });
+    }
+
+    loadTimezone();
 
     function hexToBytes(hex) {
       const len = hex.length / 2;

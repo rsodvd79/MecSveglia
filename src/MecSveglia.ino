@@ -30,6 +30,8 @@ Adafruit_SSD1306 display(128, 32, &Wire, -1);
 String ssid = "";
 String password = "";
 String mdns_name = "MECSVEGLIA";
+static const char* const DEFAULT_TZ = "CET-1CEST,M3.5.0/2,M10.5.0/3";
+String timezonePosix = DEFAULT_TZ;
 
 static timeval tv;
 static time_t xnow;
@@ -82,6 +84,8 @@ void handleSetupPost();
 void handleStatus();
 void handleOled();
 void handleFavicon();
+void handleTimezoneGet();
+void handleTimezonePost();
 
 void handleRoot() {
 	digitalWrite(LED_BUILTIN, LOW);
@@ -175,6 +179,25 @@ void time_is_set_scheduled() {
 		digitalWrite(LED_BUILTIN, HIGH);
 	}
 
+}
+
+String normalizeTimezone(const String& tz) {
+    String trimmed = tz;
+    trimmed.trim();
+    if (!trimmed.length()) {
+        return String(DEFAULT_TZ);
+    }
+    return trimmed;
+}
+
+void applyTimezone() {
+#if defined(ESP8266)
+    configTime(timezonePosix.c_str(), "pool.ntp.org");
+#else
+    setenv("TZ", timezonePosix.c_str(), 1);
+    tzset();
+    configTzTime(timezonePosix.c_str(), "pool.ntp.org");
+#endif
 }
 
 int dBmtoPercentage(int dBm) {
@@ -681,6 +704,21 @@ void setup(void) {
         else {
             AddScreenRows(F("FILE MDNS_NM.TXT KO"));
         }
+        if (LittleFS.exists("/TIME_ZONE.TXT")) {
+            File ftz = LittleFS.open("/TIME_ZONE.TXT", "r");
+            if (ftz) {
+                AddScreenRows(F("FILE TIME_ZONE.TXT OK"));
+                String tz = ftz.readString();
+                ftz.close();
+                timezonePosix = normalizeTimezone(tz);
+            }
+            else {
+                AddScreenRows(F("FILE TIME_ZONE.TXT KO"));
+            }
+        }
+        else {
+            AddScreenRows(F("FILE TIME_ZONE.TXT KO"));
+        }
 		if (LittleFS.exists("/METEO_API.TXT")) {
 			File fmta = LittleFS.open("/METEO_API.TXT", "r");
 			if (fmta) {
@@ -810,6 +848,8 @@ void setup(void) {
         json += F("}");
         server.send(200, F("application/json"), json);
     });
+    server.on(F("/timezone"), HTTP_GET, handleTimezoneGet);
+    server.on(F("/timezone"), HTTP_POST, handleTimezonePost);
     server.on(F("/setup"), HTTP_POST, handleSetupPost);
 
 	server.onNotFound(handleNotFound);
@@ -938,17 +978,14 @@ void setup(void) {
     ArduinoOTA.begin();
 
 #if defined(ESP8266)
-	configTime(TZ_Europe_Rome, "pool.ntp.org");
-	time_t rtc = 0;
-	timeval tv = { rtc, 0 };
-	settimeofday(&tv, nullptr);
-	settimeofday_cb(time_is_set_scheduled);
+    time_t rtc = 0;
+    timeval tv = { rtc, 0 };
+    settimeofday(&tv, nullptr);
+    settimeofday_cb(time_is_set_scheduled);
+    applyTimezone();
 #else
-    // ESP32: set timezone (Europe/Rome) and start SNTP
-    setenv("TZ", "CET-1CEST,M3.5.0/2,M10.5.0/3", 1);
-    tzset();
-    configTime(0, 0, "pool.ntp.org");
     sntp_set_time_sync_notification_cb([](struct timeval* tv){ (void)tv; time_is_set_scheduled(); });
+    applyTimezone();
 #endif
 
 	delay(500);
@@ -1100,6 +1137,42 @@ void handleSetupPost() {
     } else {
         server.send(500, F("text/plain"), F("Errore scrittura parametri"));
     }
+}
+
+void handleTimezoneGet() {
+    String json = F("{\"tz\":\"");
+    json += timezonePosix;
+    json += F("\"}");
+    server.send(200, F("application/json"), json);
+}
+
+void handleTimezonePost() {
+    if (!server.hasArg("tz")) {
+        server.send(400, F("text/plain"), F("Parametro tz mancante"));
+        return;
+    }
+
+    String newTz = normalizeTimezone(server.arg("tz"));
+    if (!LittleFS.begin()) {
+        server.send(500, F("text/plain"), F("Filesystem non disponibile"));
+        return;
+    }
+
+    File f = LittleFS.open("/TIME_ZONE.TXT", "w");
+    if (!f) {
+        server.send(500, F("text/plain"), F("Errore scrittura fuso"));
+        return;
+    }
+    f.print(newTz);
+    f.close();
+
+    timezonePosix = newTz;
+    applyTimezone();
+
+    String json = F("{\"tz\":\"");
+    json += timezonePosix;
+    json += F("\"}");
+    server.send(200, F("application/json"), json);
 }
 
 void handleStatus() {
