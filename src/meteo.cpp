@@ -1,13 +1,5 @@
-// 
-// 
-// 
-
 #include "meteo.h"
-#if defined(ESP8266)
-#include <ESP8266HTTPClient.h>
-#else
 #include <HTTPClient.h>
-#endif
 #include <ArduinoJson.h>
 
 classMeteo::classMeteo() {
@@ -23,10 +15,9 @@ void classMeteo::Update() {
 	WiFiClient client;
 	HTTPClient http;
 
-	//"http://api.openweathermap.org/data/2.5/weather?id=3175384&cnt=1&units=metric&lang=it&appid=d6e8496c2158406d21ce7d4a1b6c0910"
 	String URL = F("http://api.openweathermap.org/data/2.5/weather?");
 
-	if (URL.concat(Api) && http.begin(client, URL)) {  // HTTP
+	if (URL.concat(Api) && http.begin(client, URL)) {
 		int httpCode = http.GET();
 
 		if (httpCode > 0) {

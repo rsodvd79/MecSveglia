@@ -191,13 +191,9 @@ String normalizeTimezone(const String& tz) {
 }
 
 void applyTimezone() {
-#if defined(ESP8266)
-    configTime(timezonePosix.c_str(), "pool.ntp.org");
-#else
     setenv("TZ", timezonePosix.c_str(), 1);
     tzset();
     configTzTime(timezonePosix.c_str(), "pool.ntp.org");
-#endif
 }
 
 int dBmtoPercentage(int dBm) {
@@ -977,16 +973,8 @@ void setup(void) {
     ArduinoOTA.setHostname(mdns_name.c_str());
     ArduinoOTA.begin();
 
-#if defined(ESP8266)
-    time_t rtc = 0;
-    timeval tv = { rtc, 0 };
-    settimeofday(&tv, nullptr);
-    settimeofday_cb(time_is_set_scheduled);
-    applyTimezone();
-#else
     sntp_set_time_sync_notification_cb([](struct timeval* tv){ (void)tv; time_is_set_scheduled(); });
     applyTimezone();
-#endif
 
 	delay(500);
 
@@ -995,12 +983,6 @@ void setup(void) {
 void loop(void) {
     ArduinoOTA.handle();
     server.handleClient();
-    // mDNS upkeep (only required on ESP8266)
-#if defined(ESP8266)
-    if (mdnsStarted) {
-        MDNS.update();
-    }
-#endif
     Bottone.Update();
 
     // Periodic brightness adjustment based on local time (night dim)
@@ -1179,13 +1161,8 @@ void handleStatus() {
     IPAddress ip = WiFi.localIP();
     int rssi = WiFi.RSSI();
     int qual = dBmtoPercentage(rssi);
-#if defined(ESP8266)
-    WiFiMode_t mode = WiFi.getMode();
-    bool apMode = (mode == WIFI_AP || mode == WIFI_AP_STA);
-#else
     auto mode = WiFi.getMode();
     bool apMode = (mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA);
-#endif
     IPAddress apIP = WiFi.softAPIP();
     String json = F("{");
     json += F("\"ip\":\""); json += ip.toString(); json += F("\",");
