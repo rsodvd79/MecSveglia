@@ -64,8 +64,6 @@ static esp8266::polledTimeout::periodicMs showGOLNow(80);
 static esp8266::polledTimeout::periodicMs showTriNow(60);
 static esp8266::polledTimeout::periodicMs adjustBrightnessNow(1000 * 60);
 static esp8266::polledTimeout::periodicMs invertPulseNow(1000 * 60 * 30);
-static int time_machine_days = 0; // 0 = now
-static bool time_machine_running = false;
 static bool tsep = true;
 //static bool keyp = false;
 
@@ -150,35 +148,7 @@ void handleNotFound() {
 }
 
 void time_is_set_scheduled() {
-	// everything is allowed in this function
-
-	if (time_machine_days == 0) {
-		time_machine_running = !time_machine_running;
-	}
-
-	// time machine demo
-	if (time_machine_running) {
-		digitalWrite(LED_BUILTIN, LOW);
-
-		xnow = time(nullptr);
-
-		//const tm* tm = localtime(&xnow);
-
-		gettimeofday(&tv, nullptr);
-		constexpr int days = 30;
-		time_machine_days += days;
-		if (time_machine_days > 360) {
-			tv.tv_sec -= (time_machine_days - days) * 60 * 60 * 24;
-			time_machine_days = 0;
-		}
-		else {
-			tv.tv_sec += days * 60 * 60 * 24;
-		}
-		settimeofday(&tv, nullptr);
-
-		digitalWrite(LED_BUILTIN, HIGH);
-	}
-
+	// SNTP callback retained for future use; intentionally no manual time adjustments.
 }
 
 String normalizeTimezone(const String& tz) {
@@ -1213,3 +1183,4 @@ void handleFavicon() {
     }
     server.send(404, F("text/plain"), F(""));
 }
+
