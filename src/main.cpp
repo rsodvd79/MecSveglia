@@ -598,7 +598,7 @@ void showScreen5() {
 	static float x[3], y[3], vx[3], vy[3];
     if (!init) {
         // seed PRNG for initial directions
-        randomSeed(analogRead(0));
+        randomSeed(esp_random());
 		// Initialize positions and velocities
 		for (int i = 0; i < 3; i++) {
 			x[i] = random(8, max(9, W - 8));
@@ -790,7 +790,7 @@ void showScreen7() {
 
     }
 
-    const int textY = 20;
+    const int textY = 24;
 
     int textWidth = headline.length() * 6;
 
