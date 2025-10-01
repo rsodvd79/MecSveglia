@@ -35,6 +35,8 @@
     select { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid #1f2937; background: #0b1220; color: var(--text); font-size: 15px; }
     .form-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
     .form-row .status { margin-top: 0; }
+    #rss-preview { margin-top: 8px; padding-left: 18px; font-size: 12px; color: var(--muted); }
+    #rss-preview li { margin-bottom: 4px; }
     .card { background: var(--panel); border: 1px solid #1f2937; padding: 16px; border-radius: 12px; margin-top: 16px; }
     .status { margin-top: 12px; font-size: 14px; min-height: 1.4em; }
     .ok { color: var(--accent); }
@@ -103,6 +105,22 @@
       <p style="margin-top:8px; font-size:12px; color:var(--muted);">La schermata scelta viene salvata in <code>SCREEN.TXT</code> e mostrata al riavvio.</p>
     </div>
 
+    <div class="card" id="rss-card">
+      <strong>RSS ANSA</strong>
+      <form id="rss-form" autocomplete="off">
+        <label for="rss-category">Categoria</label>
+        <select id="rss-category" name="category" aria-label="Categoria RSS">
+          <option value="">Caricamento...</option>
+        </select>
+        <div class="form-row">
+          <button type="submit" class="primary">Salva categoria</button>
+          <span id="rss-status" class="status" aria-live="polite"></span>
+        </div>
+      </form>
+      <ul id="rss-preview"></ul>
+      <p style="margin-top:8px; font-size:12px; color:var(--muted);">La categoria scelta viene salvata in <code>RSS.TXT</code> e gli RSS si aggiornano ogni ora.</p>
+    </div>
+
     <div class="card">
       <strong>Fuso orario</strong>
       <form id="tz-form" autocomplete="off">
@@ -154,6 +172,10 @@
     const screenForm = document.getElementById('screen-form');
     const screenSelect = document.getElementById('screen-select');
     const screenStatus = document.getElementById('screen-status');
+    const rssForm = document.getElementById('rss-form');
+    const rssSelect = document.getElementById('rss-category');
+    const rssStatus = document.getElementById('rss-status');
+    const rssPreview = document.getElementById('rss-preview');
     const screenOptionsFallback = [
       { id: 0, label: 'Wi-Fi' },
       { id: 1, label: 'Ora/Data' },
@@ -161,7 +183,18 @@
       { id: 3, label: 'Meteo' },
       { id: 4, label: 'Game of Life' },
       { id: 5, label: 'Triangolo' },
-      { id: 6, label: 'Ciclo automatico' },
+      { id: 6, label: 'RSS ANSA' },
+      { id: 7, label: 'Ciclo automatico' },
+    ];
+    const rssCategoriesFallback = [
+      'tecnologia',
+      'politica',
+      'mondo',
+      'economia',
+      'sport',
+      'cultura',
+      'scienza',
+      'cronaca',
     ];
 
     function setStatus(msg, ok=true) {
@@ -232,6 +265,16 @@
       screenStatus.textContent = msg;
     }
 
+    function setRssStatus(msg, state = null) {
+      if (!rssStatus) return;
+      if (state === null) {
+        rssStatus.className = 'status';
+      } else {
+        rssStatus.className = 'status ' + (state ? 'ok' : 'fail');
+      }
+      rssStatus.textContent = msg;
+    }
+
     function populateScreenOptions(opts) {
       if (!screenSelect) return;
       screenSelect.innerHTML = '';
@@ -242,6 +285,38 @@
         option.value = String(opt.id);
         option.textContent = opt.label || ('Schermo ' + opt.id);
         screenSelect.appendChild(option);
+      });
+    }
+
+    function populateRssCategories(categories, current) {
+      if (!rssSelect) return;
+      rssSelect.innerHTML = '';
+      const list = Array.isArray(categories) && categories.length ? categories : rssCategoriesFallback;
+      list.forEach((cat) => {
+        const option = document.createElement('option');
+        option.value = String(cat);
+        option.textContent = cat.charAt(0).toUpperCase() + cat.slice(1);
+        option.selected = current && String(current) === String(cat);
+        rssSelect.appendChild(option);
+      });
+      if (!rssSelect.value && rssSelect.options.length) {
+        rssSelect.value = rssSelect.options[0].value;
+      }
+    }
+
+    function updateRssPreview(items) {
+      if (!rssPreview) return;
+      rssPreview.innerHTML = '';
+      if (!Array.isArray(items) || !items.length) {
+        const li = document.createElement('li');
+        li.textContent = 'Nessun titolo disponibile';
+        rssPreview.appendChild(li);
+        return;
+      }
+      items.slice(0, 5).forEach((headline) => {
+        const li = document.createElement('li');
+        li.textContent = headline;
+        rssPreview.appendChild(li);
       });
     }
 
@@ -284,6 +359,30 @@
         setScreenStatus('Impossibile leggere schermate: ' + (e.message || 'errore'), false);
       } finally {
         if (screenSelect) screenSelect.disabled = false;
+      }
+    }
+
+    async function loadRssCategory() {
+      if (!rssSelect) return;
+      try {
+        setRssStatus('Caricamento RSS...');
+        rssSelect.disabled = true;
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 4000);
+        const res = await fetch('/rss', { cache: 'no-store', signal: ctrl.signal });
+        clearTimeout(t);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        const categories = (data && Array.isArray(data.categories) && data.categories.length) ? data.categories : rssCategoriesFallback;
+        populateRssCategories(categories, data && data.category ? data.category : '');
+        updateRssPreview(data && Array.isArray(data.items) ? data.items : []);
+        setRssStatus('Categoria RSS caricata', true);
+      } catch (e) {
+        populateRssCategories(rssCategoriesFallback, rssCategoriesFallback[0]);
+        updateRssPreview([]);
+        setRssStatus('Impossibile leggere RSS: ' + (e.message || 'errore'), false);
+      } finally {
+        if (rssSelect) rssSelect.disabled = false;
       }
     }
 
@@ -367,6 +466,54 @@
       });
     }
 
+    if (rssForm) {
+      rssForm.addEventListener('submit', async (ev) => {
+        ev.preventDefault();
+        if (!rssSelect) return;
+        const category = rssSelect.value.trim();
+        if (!category.length) {
+          setRssStatus('Seleziona una categoria', false);
+          return;
+        }
+        const submitBtn = rssForm.querySelector('button[type="submit"]');
+        try {
+          setRssStatus('Salvataggio...');
+          rssSelect.disabled = true;
+          if (submitBtn) submitBtn.disabled = true;
+          const body = new URLSearchParams();
+          body.append('category', category);
+          const ctrl = new AbortController();
+          const t = setTimeout(() => ctrl.abort(), 4000);
+          const res = await fetch('/rss', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: body.toString(),
+            signal: ctrl.signal,
+          });
+          clearTimeout(t);
+          if (!res.ok) {
+            const txt = await res.text();
+            throw new Error(txt || ('HTTP ' + res.status));
+          }
+          const ct = res.headers ? (res.headers.get('content-type') || '') : '';
+          if (ct.includes('application/json')) {
+            const data = await res.json();
+            const categories = (data && Array.isArray(data.categories) && data.categories.length) ? data.categories : rssCategoriesFallback;
+            populateRssCategories(categories, data && data.category ? data.category : category);
+            updateRssPreview(data && Array.isArray(data.items) ? data.items : []);
+          } else {
+            await res.text();
+          }
+          setRssStatus('Categoria RSS salvata', true);
+        } catch (e) {
+          setRssStatus('Errore salvataggio: ' + (e.message || 'errore'), false);
+        } finally {
+          if (submitBtn) submitBtn.disabled = false;
+          if (rssSelect) rssSelect.disabled = false;
+        }
+      });
+    }
+
     if (tzForm) {
       tzForm.addEventListener('submit', async (ev) => {
         ev.preventDefault();
@@ -408,6 +555,7 @@
     }
 
     loadStartScreen();
+    loadRssCategory();
     loadTimezone();
 
     function hexToBytes(hex) {

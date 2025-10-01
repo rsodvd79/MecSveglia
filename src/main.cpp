@@ -16,6 +16,7 @@
 #include <math.h>
 #include <ctype.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 // Map LittleFS alias to SPIFFS on ESP32 (partition is 'spiffs')
 #if defined(ESP32)
@@ -26,6 +27,7 @@
 #include "Button.h"
 #include "screen.h"
 #include "GOL.h"
+#include "rss.h"
 
 Adafruit_SSD1306 display(128, 32, &Wire, -1);
 
@@ -65,6 +67,8 @@ static esp8266::polledTimeout::periodicMs showMeteoNow(1000 * 30);
 static esp8266::polledTimeout::periodicMs showCicloScreenNow(1000 * 60);
 static esp8266::polledTimeout::periodicMs showGOLNow(80);
 static esp8266::polledTimeout::periodicMs showTriNow(60);
+static esp8266::polledTimeout::periodicMs showRssScrollNow(120);
+static esp8266::polledTimeout::periodicMs refreshRssNow(1000 * 60 * 60);
 static esp8266::polledTimeout::periodicMs adjustBrightnessNow(1000 * 60);
 static esp8266::polledTimeout::periodicMs invertPulseNow(1000 * 60 * 30);
 static esp8266::polledTimeout::periodicMs ensureTimeNow(1000 * 15);
@@ -81,12 +85,13 @@ WebServer server(80);
 classEye eye = classEye();
 classButton Bottone = classButton(12, ButtonInputMode::BTN_PULLUP);
 classMeteo meteo = classMeteo();
-classScreen screen = classScreen(6);
+classScreen screen = classScreen(7);
 bool CicloScreen = false;
 classGOL GOL = classGOL();
 bool mdnsStarted = false;
+classRss rss;
 
-static const unsigned int SCREEN_MAX_INDEX = 6;
+static const unsigned int SCREEN_MAX_INDEX = 7;
 struct ScreenOption { uint8_t id; const char* label; };
 static const ScreenOption SCREEN_OPTIONS[] = {
     { 0, "Wi-Fi" },
@@ -95,7 +100,8 @@ static const ScreenOption SCREEN_OPTIONS[] = {
     { 3, "Meteo" },
     { 4, "Game of Life" },
     { 5, "Triangolo" },
-    { 6, "Ciclo automatico" }
+    { 6, "RSS ANSA" },
+    { 7, "Ciclo automatico" }
 };
 static const size_t SCREEN_OPTION_COUNT = sizeof(SCREEN_OPTIONS) / sizeof(SCREEN_OPTIONS[0]);
 static uint8_t startScreen = 0;
@@ -110,6 +116,8 @@ void handleTimezoneGet();
 void handleTimezonePost();
 void handleScreenStartGet();
 void handleScreenStartPost();
+void handleRssGet();
+void handleRssPost();
 
 void handleRoot() {
 	digitalWrite(LED_BUILTIN, LOW);
@@ -233,6 +241,46 @@ String normalizeTimezone(const String& tz) {
     }
     return trimmed;
 }
+
+
+String jsonEscape(const String& input) {
+    String out;
+    out.reserve(input.length() + 8);
+    for (size_t i = 0; i < input.length(); ++i) {
+        char c = input[i];
+        switch (c) {
+            case '\\':
+                out += "\\";
+                break;
+            case '"':
+                out += "\"";
+                break;
+            case '\n':
+                out += "\n";
+                break;
+            case '\r':
+                break;
+            case '\t':
+                out += "\t";
+                break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char buf[7];
+                    snprintf(buf, sizeof(buf), "\\u%04X", static_cast<unsigned char>(c));
+                    out += buf;
+                } else {
+                    out += c;
+                }
+                break;
+        }
+    }
+    return out;
+}
+
+
+
+
+
 
 void applyTimezone() {
     setenv("TZ", timezonePosix.c_str(), 1);
@@ -660,6 +708,160 @@ void showScreen6() {
 	display.println(txt);
 	display.display();
 }
+void showScreen7() {
+
+    const int displayW = display.width();
+
+    const size_t count = rss.itemCount();
+
+    static float scrollX = 0.0f;
+
+    static float scrollStep = 1.0f;
+
+    static size_t currentItem = 0;
+
+    static size_t cachedCount = 0;
+
+    static unsigned long cachedStamp = 0;
+
+    static bool stepDirty = true;
+
+    if (count == 0) {
+
+        currentItem = 0;
+
+        scrollX = displayW;
+
+        display.clearDisplay();
+
+        display.setTextSize(1);
+
+        display.setCursor(0, 0);
+
+        display.print(F("ANSA "));
+
+        display.print(rss.category());
+
+        display.setCursor(0, 16);
+
+        if (WiFi.status() == WL_CONNECTED) {
+
+            display.print(F("Nessun feed disponibile"));
+
+        } else {
+
+            display.print(F("Wi-Fi non connesso"));
+
+        }
+
+        display.display();
+
+        return;
+
+    }
+
+    if (count != cachedCount || rss.lastFetchMillis() != cachedStamp) {
+
+        cachedCount = count;
+
+        cachedStamp = rss.lastFetchMillis();
+
+        currentItem = 0;
+
+        scrollX = displayW;
+
+        stepDirty = true;
+
+    }
+
+    if (currentItem >= count) {
+
+        currentItem = 0;
+
+        stepDirty = true;
+
+    }
+
+    String headline = rss.item(currentItem);
+
+    if (!headline.length()) {
+
+        headline = F("Feed non disponibile");
+
+    }
+
+    const int textY = 20;
+
+    int textWidth = headline.length() * 6;
+
+    if (textWidth < 1) {
+
+        textWidth = displayW / 2;
+
+    }
+
+    if (stepDirty) {
+
+        const float frames = 12000.0f / 120.0f;
+
+        float totalDistance = displayW + textWidth + 16.0f;
+
+        scrollStep = totalDistance / frames;
+
+        if (scrollStep < 1.0f) {
+
+            scrollStep = 1.0f;
+
+        }
+
+        scrollX = displayW;
+
+        stepDirty = false;
+
+    }
+
+    display.clearDisplay();
+
+    display.setTextSize(1);
+
+    display.setCursor(0, 0);
+
+    display.print(F("ANSA "));
+
+    display.print(rss.category());
+
+    display.setCursor(0, 8);
+
+    display.print(currentItem + 1);
+
+    display.print(F("/"));
+
+    display.print(count);
+
+    int drawX = static_cast<int>(scrollX);
+
+    display.setCursor(drawX, textY);
+
+    display.print(headline);
+
+    display.display();
+
+    scrollX -= scrollStep;
+
+    if (scrollX < -textWidth - 16.0f) {
+
+        currentItem = (currentItem + 1) % count;
+
+        stepDirty = true;
+
+    }
+
+}
+
+
+
+
+
 
 void showScreenInit(unsigned int s) {
 
@@ -685,6 +887,9 @@ void showScreenInit(unsigned int s) {
 		showScreen5();
 		break;
 	case 6:
+		showScreen7();
+		break;
+	case 7:
 		showScreen6();
 		break;
 	}
@@ -726,6 +931,9 @@ void setup(void) {
 
     screen.RowClear();
     bool wifiConfigured = true;
+    rss.begin();
+    String rssCategory = classRss::kDefaultCategory;
+    bool rssCategoryDirty = false;
 
 	if (LittleFS.begin()) {
 		AddScreenRows(F("FS OK"));
@@ -813,6 +1021,38 @@ void setup(void) {
         else {
             AddScreenRows(F("FILE TIME_ZONE.TXT KO"));
         }
+        if (LittleFS.exists("/RSS.TXT")) {
+            File frss = LittleFS.open("/RSS.TXT", "r");
+            if (frss) {
+                AddScreenRows(F("FILE RSS.TXT OK"));
+                String rawCat = frss.readString();
+                frss.close();
+                String normalizedCat = classRss::normalizeCategory(rawCat);
+                if (classRss::isValidCategory(normalizedCat)) {
+                    rssCategory = normalizedCat;
+                } else {
+                    AddScreenRows(F("RSS.TXT categoria KO"));
+                    rssCategory = classRss::kDefaultCategory;
+                    rssCategoryDirty = true;
+                }
+            } else {
+                AddScreenRows(F("FILE RSS.TXT KO"));
+                rssCategory = classRss::kDefaultCategory;
+                rssCategoryDirty = true;
+            }
+        } else {
+            AddScreenRows(F("FILE RSS.TXT KO"));
+            rssCategory = classRss::kDefaultCategory;
+            rssCategoryDirty = true;
+        }
+        if (rssCategoryDirty) {
+            File frssw = LittleFS.open("/RSS.TXT", "w");
+            if (frssw) {
+                frssw.print(rssCategory);
+                frssw.close();
+            }
+            rssCategoryDirty = false;
+        }
 		if (LittleFS.exists("/METEO_API.TXT")) {
 			File fmta = LittleFS.open("/METEO_API.TXT", "r");
 			if (fmta) {
@@ -832,6 +1072,8 @@ void setup(void) {
 	else {
 		AddScreenRows(F("FS KO"));
 	}
+
+    rss.setCategory(rssCategory);
 
 	delay(500);
 
@@ -877,6 +1119,7 @@ void setup(void) {
             }
 
             display.display();
+            rss.refresh();
         } else {
             // Connection failed: fallback to AP mode with SSID = mdns_name
             // Ensure any previously stored STA credentials are cleared to avoid boot loops
@@ -946,6 +1189,8 @@ void setup(void) {
     server.on(F("/timezone"), HTTP_POST, handleTimezonePost);
     server.on(F("/screen/start"), HTTP_GET, handleScreenStartGet);
     server.on(F("/screen/start"), HTTP_POST, handleScreenStartPost);
+    server.on(F("/rss"), HTTP_GET, handleRssGet);
+    server.on(F("/rss"), HTTP_POST, handleRssPost);
     server.on(F("/setup"), HTTP_POST, handleSetupPost);
 
 	server.onNotFound(handleNotFound);
@@ -983,7 +1228,7 @@ void setup(void) {
         server.on(F("/cycle"), []() {
             // Enable auto cycle mode and show marker screen
             CicloScreen = true;
-            showScreenInit(6);
+            showScreenInit(7);
             server.send(200, F("text/plain"), F(""));
             });
 
@@ -1090,6 +1335,10 @@ void loop(void) {
         maintainTimeSync();
     }
 
+    if (WiFi.status() == WL_CONNECTED && refreshRssNow) {
+        rss.refresh();
+    }
+
     // Periodic brightness adjustment based on local time (night dim)
     if (adjustBrightnessNow) {
         time_t nowt = time(nullptr);
@@ -1126,7 +1375,7 @@ void loop(void) {
 
     if (CicloScreen && showCicloScreenNow) {
         unsigned int sn = screen.Next();
-        if (sn == 0 || sn == 6) {
+        if (sn == 0 || sn == 7) {
             sn = screen.Current(1);
         }
         showScreenInit(sn);
@@ -1169,6 +1418,11 @@ void loop(void) {
         }
         break;
     case 6:
+        if (showRssScrollNow) {
+            showScreen7();
+        }
+        break;
+    case 7:
         // Animate the bouncing text frequently
         if (showTriNow) {
             showScreen6();
@@ -1279,6 +1533,128 @@ void handleScreenStartPost() {
     json += F("\"}");
     server.send(200, F("application/json"), json);
 }
+void handleRssGet() {
+
+    String json = F("{\"category\":\"");
+
+    json += jsonEscape(rss.category());
+
+    json += F("\",\"categories\":[");
+
+    for (size_t i = 0; i < classRss::kCategoryCount; ++i) {
+
+        if (i) json += ',';
+
+        json += '\"';
+
+        json += classRss::kCategories[i];
+
+        json += '\"';
+
+    }
+
+    json += F("],\"items\":[");
+
+    size_t count = rss.itemCount();
+
+    for (size_t i = 0; i < count; ++i) {
+
+        if (i) json += ',';
+
+        json += '\"';
+
+        json += jsonEscape(rss.item(i));
+
+        json += '\"';
+
+    }
+
+    json += F("]}");
+
+    server.send(200, F("application/json"), json);
+
+}
+
+
+
+void handleRssPost() {
+
+    if (!server.hasArg("category")) {
+
+        server.send(400, F("text/plain"), F("Parametro category mancante"));
+
+        return;
+
+    }
+
+    String requested = classRss::normalizeCategory(server.arg("category"));
+
+    if (!classRss::isValidCategory(requested)) {
+
+        server.send(400, F("text/plain"), F("Categoria non valida"));
+
+        return;
+
+    }
+
+    if (!LittleFS.begin()) {
+
+        server.send(500, F("text/plain"), F("Filesystem non disponibile"));
+
+        return;
+
+    }
+
+    File f = LittleFS.open("/RSS.TXT", "w");
+
+    if (!f) {
+
+        server.send(500, F("text/plain"), F("Errore scrittura RSS"));
+
+        return;
+
+    }
+
+    f.print(requested);
+
+    f.close();
+
+    rss.setCategory(requested);
+
+    bool updated = rss.refresh();
+
+    String json = F("{\"category\":\"");
+
+    json += jsonEscape(rss.category());
+
+    json += F("\",\"updated\":");
+
+    json += updated ? F("true") : F("false");
+
+    json += F(",\"items\":[");
+
+    size_t count = rss.itemCount();
+
+    for (size_t i = 0; i < count; ++i) {
+
+        if (i) json += ',';
+
+        json += '\"';
+
+        json += jsonEscape(rss.item(i));
+
+        json += '\"';
+
+    }
+
+    json += F("]}");
+
+    server.send(200, F("application/json"), json);
+
+}
+
+
+
 
 void handleTimezoneGet() {
     String json = F("{\"tz\":\"");
@@ -1372,4 +1748,7 @@ void handleFavicon() {
     }
     server.send(404, F("text/plain"), F(""));
 }
+
+
+
 
