@@ -14,6 +14,8 @@
 #include <Adafruit_SSD1306.h>
 #include <ArduinoOTA.h>
 #include <math.h>
+#include <ctype.h>
+#include <stdlib.h>
 
 // Map LittleFS alias to SPIFFS on ESP32 (partition is 'spiffs')
 #if defined(ESP32)
@@ -32,6 +34,7 @@ String password = "";
 String mdns_name = "MECSVEGLIA";
 static const char* const DEFAULT_TZ = "CET-1CEST,M3.5.0/2,M10.5.0/3";
 String timezonePosix = DEFAULT_TZ;
+static bool timezoneConfigured = false;
 
 static timeval tv;
 static time_t xnow;
@@ -64,6 +67,13 @@ static esp8266::polledTimeout::periodicMs showGOLNow(80);
 static esp8266::polledTimeout::periodicMs showTriNow(60);
 static esp8266::polledTimeout::periodicMs adjustBrightnessNow(1000 * 60);
 static esp8266::polledTimeout::periodicMs invertPulseNow(1000 * 60 * 30);
+static esp8266::polledTimeout::periodicMs ensureTimeNow(1000 * 15);
+static bool timeSyncedOnce = false;
+static time_t lastSuccessfulSync = 0;
+static uint32_t lastTimeSyncAttemptMs = 0;
+static const time_t MIN_VALID_EPOCH = 1672531200; // 2023-01-01T00:00:00Z
+static const time_t RESYNC_INTERVAL_SEC = 12 * 60 * 60;
+static const uint32_t SYNC_RETRY_INTERVAL_MS = 60 * 1000;
 static bool tsep = true;
 //static bool keyp = false;
 
@@ -76,6 +86,20 @@ bool CicloScreen = false;
 classGOL GOL = classGOL();
 bool mdnsStarted = false;
 
+static const unsigned int SCREEN_MAX_INDEX = 6;
+struct ScreenOption { uint8_t id; const char* label; };
+static const ScreenOption SCREEN_OPTIONS[] = {
+    { 0, "Wi-Fi" },
+    { 1, "Ora/Data" },
+    { 2, "Eyes" },
+    { 3, "Meteo" },
+    { 4, "Game of Life" },
+    { 5, "Triangolo" },
+    { 6, "Ciclo automatico" }
+};
+static const size_t SCREEN_OPTION_COUNT = sizeof(SCREEN_OPTIONS) / sizeof(SCREEN_OPTIONS[0]);
+static uint8_t startScreen = 0;
+
 // HTTP handlers prototypes
 void handleSetupGet();
 void handleSetupPost();
@@ -84,6 +108,8 @@ void handleOled();
 void handleFavicon();
 void handleTimezoneGet();
 void handleTimezonePost();
+void handleScreenStartGet();
+void handleScreenStartPost();
 
 void handleRoot() {
 	digitalWrite(LED_BUILTIN, LOW);
@@ -147,8 +173,56 @@ void handleNotFound() {
 	digitalWrite(LED_BUILTIN, HIGH);
 }
 
+static bool isValidScreenIndex(unsigned int value) {
+    return value <= SCREEN_MAX_INDEX;
+}
+
+static const char* screenLabelFor(uint8_t id) {
+    for (size_t i = 0; i < SCREEN_OPTION_COUNT; ++i) {
+        if (SCREEN_OPTIONS[i].id == id) {
+            return SCREEN_OPTIONS[i].label;
+        }
+    }
+    return "";
+}
+
+static bool parseScreenIndex(const String& src, unsigned int& out) {
+    String trimmed = src;
+    trimmed.trim();
+    if (!trimmed.length()) {
+        return false;
+    }
+    const char* c = trimmed.c_str();
+    char* end = nullptr;
+    long value = strtol(c, &end, 10);
+    if (end == c || *end != '\0') {
+        return false;
+    }
+    if (value < 0 || !isValidScreenIndex(static_cast<unsigned int>(value))) {
+        return false;
+    }
+    out = static_cast<unsigned int>(value);
+    return true;
+}
+
+static bool timeIsSane(time_t candidate) {
+    return candidate >= MIN_VALID_EPOCH;
+}
+
+static void startTimeSync() {
+    if (!timezoneConfigured) {
+        return;
+    }
+    sntp_restart();
+    lastTimeSyncAttemptMs = millis();
+}
+
 void time_is_set_scheduled() {
-	// SNTP callback retained for future use; intentionally no manual time adjustments.
+	time_t now = time(nullptr);
+	if (timeIsSane(now)) {
+		timeSyncedOnce = true;
+		lastSuccessfulSync = now;
+	}
 }
 
 String normalizeTimezone(const String& tz) {
@@ -164,6 +238,43 @@ void applyTimezone() {
     setenv("TZ", timezonePosix.c_str(), 1);
     tzset();
     configTzTime(timezonePosix.c_str(), "pool.ntp.org");
+    timezoneConfigured = true;
+    timeSyncedOnce = false;
+    lastSuccessfulSync = 0;
+    startTimeSync();
+}
+
+static void maintainTimeSync() {
+    if (!timezoneConfigured) {
+        return;
+    }
+    if (WiFi.status() != WL_CONNECTED) {
+        lastTimeSyncAttemptMs = 0;
+        return;
+    }
+    const uint32_t nowMs = millis();
+    time_t now = time(nullptr);
+    if (!timeIsSane(now)) {
+        timeSyncedOnce = false;
+        if (nowMs - lastTimeSyncAttemptMs >= SYNC_RETRY_INTERVAL_MS) {
+            startTimeSync();
+        }
+        return;
+    }
+    if (!timeSyncedOnce) {
+        timeSyncedOnce = true;
+        if (lastSuccessfulSync == 0) {
+            lastSuccessfulSync = now;
+        }
+        return;
+    }
+    if (lastSuccessfulSync == 0) {
+        lastSuccessfulSync = now;
+    }
+    if ((now - lastSuccessfulSync) >= RESYNC_INTERVAL_SEC &&
+        (nowMs - lastTimeSyncAttemptMs) >= SYNC_RETRY_INTERVAL_MS) {
+        startTimeSync();
+    }
 }
 
 int dBmtoPercentage(int dBm) {
@@ -210,18 +321,31 @@ void showScreen1() {
 		tsep = tsep ? false : true;
 	}
 
+	bool validClock = timeIsSane(xnow);
+
 	char LCDTime[9];
-
-	if (tsep == 0) {
-		strftime(LCDTime, 9, "%H:%M:%S", localtime(&xnow));
-	}
-	else {
-		strftime(LCDTime, 9, "%H %M %S", localtime(&xnow));
-	}
-
 	char LCDDate[11];
 
-	strftime(LCDDate, 11, "%d/%m/%Y", localtime(&xnow));
+	if (tsep == 0) {
+		snprintf(LCDTime, sizeof(LCDTime), "--:--:--");
+	}
+	else {
+		snprintf(LCDTime, sizeof(LCDTime), "-- -- --");
+	}
+	snprintf(LCDDate, sizeof(LCDDate), "--/--/----");
+
+	if (validClock) {
+		const tm* lt = localtime(&xnow);
+		if (lt) {
+			if (tsep == 0) {
+				strftime(LCDTime, sizeof(LCDTime), "%H:%M:%S", lt);
+			}
+			else {
+				strftime(LCDTime, sizeof(LCDTime), "%H %M %S", lt);
+			}
+			strftime(LCDDate, sizeof(LCDDate), "%d/%m/%Y", lt);
+		}
+	}
 
 	// Simple horizontal + vertical bounce of the time+date block
 	static int timeX = 0;
@@ -610,8 +734,11 @@ void setup(void) {
 			if (fscr) {
 				AddScreenRows(F("FILE SCREEN.TXT OK"));
 				String scr = fscr.readString();
-				scr.trim();
-				screen.Current(scr.toInt());
+				unsigned int parsedScreen = 0;
+				if (parseScreenIndex(scr, parsedScreen)) {
+					startScreen = static_cast<uint8_t>(parsedScreen);
+				}
+				screen.Current(startScreen);
 				fscr.close();
 			}
 			else {
@@ -621,6 +748,7 @@ void setup(void) {
 		else {
 			AddScreenRows(F("FILE SCREEN.TXT KO"));
 		}
+		startScreen = static_cast<uint8_t>(screen.Current());
         if (LittleFS.exists("/WIFI_SID.TXT")) {
             File fsid = LittleFS.open("/WIFI_SID.TXT", "r");
             if (fsid) {
@@ -816,6 +944,8 @@ void setup(void) {
     });
     server.on(F("/timezone"), HTTP_GET, handleTimezoneGet);
     server.on(F("/timezone"), HTTP_POST, handleTimezonePost);
+    server.on(F("/screen/start"), HTTP_GET, handleScreenStartGet);
+    server.on(F("/screen/start"), HTTP_POST, handleScreenStartPost);
     server.on(F("/setup"), HTTP_POST, handleSetupPost);
 
 	server.onNotFound(handleNotFound);
@@ -945,6 +1075,7 @@ void setup(void) {
 
     sntp_set_time_sync_notification_cb([](struct timeval* tv){ (void)tv; time_is_set_scheduled(); });
     applyTimezone();
+    maintainTimeSync();
 
 	delay(500);
 
@@ -954,6 +1085,10 @@ void loop(void) {
     ArduinoOTA.handle();
     server.handleClient();
     Bottone.Update();
+
+    if (ensureTimeNow) {
+        maintainTimeSync();
+    }
 
     // Periodic brightness adjustment based on local time (night dim)
     if (adjustBrightnessNow) {
@@ -1089,6 +1224,60 @@ void handleSetupPost() {
     } else {
         server.send(500, F("text/plain"), F("Errore scrittura parametri"));
     }
+}
+
+void handleScreenStartGet() {
+    String json = F("{\"current\":");
+    json += startScreen;
+    json += F(",\"options\":[");
+    for (size_t i = 0; i < SCREEN_OPTION_COUNT; ++i) {
+        if (i) json += ',';
+        json += F("{\"id\":");
+        json += SCREEN_OPTIONS[i].id;
+        json += F(",\"label\":\"");
+        json += SCREEN_OPTIONS[i].label;
+        json += F("\"}");
+    }
+    json += F("]}");
+    server.send(200, F("application/json"), json);
+}
+
+void handleScreenStartPost() {
+    if (!server.hasArg("value")) {
+        server.send(400, F("text/plain"), F("Parametro value mancante"));
+        return;
+    }
+
+    unsigned int parsedIndex = 0;
+    if (!parseScreenIndex(server.arg("value"), parsedIndex)) {
+        server.send(400, F("text/plain"), F("Indice schermo non valido"));
+        return;
+    }
+
+    uint8_t newIndex = static_cast<uint8_t>(parsedIndex);
+    if (!LittleFS.begin()) {
+        server.send(500, F("text/plain"), F("Filesystem non disponibile"));
+        return;
+    }
+
+    File f = LittleFS.open("/SCREEN.TXT", "w");
+    if (!f) {
+        server.send(500, F("text/plain"), F("Errore scrittura schermo"));
+        return;
+    }
+    f.println(newIndex);
+    f.close();
+
+    startScreen = newIndex;
+    screen.Current(startScreen);
+    showScreenInit(startScreen);
+
+    String json = F("{\"current\":");
+    json += startScreen;
+    json += F(",\"label\":\"");
+    json += screenLabelFor(startScreen);
+    json += F("\"}");
+    server.send(200, F("application/json"), json);
 }
 
 void handleTimezoneGet() {

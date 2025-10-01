@@ -32,6 +32,7 @@
     form { margin: 0; }
     label { display: block; margin-top: 12px; font-size: 13px; color: var(--muted); }
     input[type="text"] { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid #1f2937; background: #0b1220; color: var(--text); font-size: 15px; }
+    select { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid #1f2937; background: #0b1220; color: var(--text); font-size: 15px; }
     .form-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
     .form-row .status { margin-top: 0; }
     .card { background: var(--panel); border: 1px solid #1f2937; padding: 16px; border-radius: 12px; margin-top: 16px; }
@@ -87,6 +88,21 @@
       <div class="status" id="info-status"></div>
     </div>
 
+    <div class="card" id="screen-card">
+      <strong>Schermata di avvio</strong>
+      <form id="screen-form" autocomplete="off">
+        <label for="screen-select">Schermata mostrata all'avvio</label>
+        <select id="screen-select" name="value" aria-label="Schermata di avvio">
+          <option value="">Caricamento...</option>
+        </select>
+        <div class="form-row">
+          <button type="submit" class="primary">Salva schermata</button>
+          <span id="screen-status" class="status" aria-live="polite"></span>
+        </div>
+      </form>
+      <p style="margin-top:8px; font-size:12px; color:var(--muted);">La schermata scelta viene salvata in <code>SCREEN.TXT</code> e mostrata al riavvio.</p>
+    </div>
+
     <div class="card">
       <strong>Fuso orario</strong>
       <form id="tz-form" autocomplete="off">
@@ -135,6 +151,18 @@
     const tzForm = document.getElementById('tz-form');
     const tzInput = document.getElementById('tz-input');
     const tzStatus = document.getElementById('tz-status');
+    const screenForm = document.getElementById('screen-form');
+    const screenSelect = document.getElementById('screen-select');
+    const screenStatus = document.getElementById('screen-status');
+    const screenOptionsFallback = [
+      { id: 0, label: 'Wi-Fi' },
+      { id: 1, label: 'Ora/Data' },
+      { id: 2, label: 'Eyes' },
+      { id: 3, label: 'Meteo' },
+      { id: 4, label: 'Game of Life' },
+      { id: 5, label: 'Triangolo' },
+      { id: 6, label: 'Ciclo automatico' },
+    ];
 
     function setStatus(msg, ok=true) {
       statusEl.className = 'status ' + (ok ? 'ok' : 'fail');
@@ -194,6 +222,71 @@
       tzStatus.textContent = msg;
     }
 
+    function setScreenStatus(msg, state = null) {
+      if (!screenStatus) return;
+      if (state === null) {
+        screenStatus.className = 'status';
+      } else {
+        screenStatus.className = 'status ' + (state ? 'ok' : 'fail');
+      }
+      screenStatus.textContent = msg;
+    }
+
+    function populateScreenOptions(opts) {
+      if (!screenSelect) return;
+      screenSelect.innerHTML = '';
+      if (!Array.isArray(opts) || !opts.length) return;
+      opts.forEach((opt) => {
+        if (!opt || typeof opt.id === 'undefined') return;
+        const option = document.createElement('option');
+        option.value = String(opt.id);
+        option.textContent = opt.label || ('Schermo ' + opt.id);
+        screenSelect.appendChild(option);
+      });
+    }
+
+    async function loadStartScreen() {
+      if (!screenSelect) return;
+      try {
+        setScreenStatus('Caricamento schermate...');
+        screenSelect.disabled = true;
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 4000);
+        const res = await fetch('/screen/start', { cache: 'no-store', signal: ctrl.signal });
+        clearTimeout(t);
+        const ct = res.headers ? (res.headers.get('content-type') || '') : '';
+        if (!res.ok) {
+          const txt = await res.text();
+          throw new Error(txt || ('HTTP ' + res.status));
+        }
+        let data = null;
+        if (ct.includes('application/json')) {
+          data = await res.json();
+        } else {
+          const txt = await res.text();
+          throw new Error(txt || 'Risposta non valida');
+        }
+        const options = (data && Array.isArray(data.options) && data.options.length) ? data.options : screenOptionsFallback;
+        populateScreenOptions(options);
+        const currentValue = (data && typeof data.current === 'number') ? String(data.current) : '';
+        const hasCurrent = currentValue && Array.from(screenSelect.options).some(opt => opt.value === currentValue);
+        if (hasCurrent) {
+          screenSelect.value = currentValue;
+        } else if (screenSelect.options.length) {
+          screenSelect.value = screenSelect.options[0].value;
+        }
+        setScreenStatus('Schermata attuale caricata', true);
+      } catch (e) {
+        populateScreenOptions(screenOptionsFallback);
+        if (screenSelect && screenSelect.options.length) {
+          screenSelect.value = screenSelect.options[0].value;
+        }
+        setScreenStatus('Impossibile leggere schermate: ' + (e.message || 'errore'), false);
+      } finally {
+        if (screenSelect) screenSelect.disabled = false;
+      }
+    }
+
     async function loadTimezone() {
       if (!tzInput) return;
       try {
@@ -223,6 +316,56 @@
     refreshInfo();
     setInterval(refreshInfo, 30000);
     document.getElementById('btn-setup').addEventListener('click', () => { location.href = '/setup'; });
+
+    if (screenForm) {
+      screenForm.addEventListener('submit', async (ev) => {
+        ev.preventDefault();
+        if (!screenSelect) return;
+        const selected = screenSelect.value;
+        if (!selected.length) {
+          setScreenStatus('Seleziona una schermata', false);
+          return;
+        }
+        const submitBtn = screenForm.querySelector('button[type="submit"]');
+        try {
+          setScreenStatus('Salvataggio...');
+          screenSelect.disabled = true;
+          if (submitBtn) submitBtn.disabled = true;
+          const body = new URLSearchParams();
+          body.append('value', selected);
+          const ctrl = new AbortController();
+          const t = setTimeout(() => ctrl.abort(), 4000);
+          const res = await fetch('/screen/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: body.toString(),
+            signal: ctrl.signal,
+          });
+          clearTimeout(t);
+          if (!res.ok) {
+            const txt = await res.text();
+            throw new Error(txt || ('HTTP ' + res.status));
+          }
+          const ct = res.headers ? (res.headers.get('content-type') || '') : '';
+          if (ct.includes('application/json')) {
+            const data = await res.json();
+            if (data && typeof data.current === 'number') {
+              const newValue = String(data.current);
+              const hasValue = Array.from(screenSelect.options).some(opt => opt.value === newValue);
+              if (hasValue) screenSelect.value = newValue;
+            }
+          } else {
+            await res.text();
+          }
+          setScreenStatus('Schermata di avvio salvata', true);
+        } catch (e) {
+          setScreenStatus('Errore salvataggio: ' + (e.message || 'errore'), false);
+        } finally {
+          if (submitBtn) submitBtn.disabled = false;
+          if (screenSelect) screenSelect.disabled = false;
+        }
+      });
+    }
 
     if (tzForm) {
       tzForm.addEventListener('submit', async (ev) => {
@@ -264,6 +407,7 @@
       });
     }
 
+    loadStartScreen();
     loadTimezone();
 
     function hexToBytes(hex) {
