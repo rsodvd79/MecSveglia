@@ -709,154 +709,103 @@ void showScreen6() {
 	display.display();
 }
 void showScreen7() {
-
-    const int displayW = display.width();
-
     const size_t count = rss.itemCount();
-
-    static float scrollX = 0.0f;
-
-    static float scrollStep = 1.0f;
-
-    static size_t currentItem = 0;
-
+    static float scrollOffset = 0.0f;
+    static size_t topIndex = 0;
     static size_t cachedCount = 0;
-
     static unsigned long cachedStamp = 0;
 
-    static bool stepDirty = true;
+    auto itemHeightFor = [&](const String& text) -> int {
+        const int charsPerLine = max(1, display.width() / 6);
+        int lines = (text.length() + charsPerLine - 1) / charsPerLine;
+        if (lines < 1) {
+            lines = 1;
+        }
+        const int lineHeight = 9;
+        const int gap = 2;
+        return lines * lineHeight + gap;
+    };
 
     if (count == 0) {
-
-        currentItem = 0;
-
-        scrollX = displayW;
-
+        topIndex = 0;
+        scrollOffset = 0.0f;
         display.clearDisplay();
-
         display.setTextSize(1);
-
+        display.setTextWrap(false);
         display.setCursor(0, 0);
-
-        display.print(F("ANSA "));
-
-        display.print(rss.category());
-
-        display.setCursor(0, 16);
-
-        if (WiFi.status() == WL_CONNECTED) {
-
-            display.print(F("Nessun feed disponibile"));
-
-        } else {
-
-            display.print(F("Wi-Fi non connesso"));
-
-        }
-
+        display.print(F("RSS vuoto"));
         display.display();
-
         return;
-
     }
 
     if (count != cachedCount || rss.lastFetchMillis() != cachedStamp) {
-
         cachedCount = count;
-
         cachedStamp = rss.lastFetchMillis();
-
-        currentItem = 0;
-
-        scrollX = displayW;
-
-        stepDirty = true;
-
-    }
-
-    if (currentItem >= count) {
-
-        currentItem = 0;
-
-        stepDirty = true;
-
-    }
-
-    String headline = rss.item(currentItem);
-
-    if (!headline.length()) {
-
-        headline = F("Feed non disponibile");
-
-    }
-
-    const int textY = 24;
-
-    int textWidth = headline.length() * 6;
-
-    if (textWidth < 1) {
-
-        textWidth = displayW / 2;
-
-    }
-
-    if (stepDirty) {
-
-        const float frames = 12000.0f / 120.0f;
-
-        float totalDistance = displayW + textWidth + 16.0f;
-
-        scrollStep = totalDistance / frames;
-
-        if (scrollStep < 1.0f) {
-
-            scrollStep = 1.0f;
-
-        }
-
-        scrollX = displayW;
-
-        stepDirty = false;
-
+        topIndex = 0;
+        scrollOffset = 0.0f;
     }
 
     display.clearDisplay();
-
     display.setTextSize(1);
+    display.setTextWrap(false);
 
-    display.setCursor(0, 0);
+    const int charsPerLine = max(1, display.width() / 6);
+    const int lineHeight = 9;
+    const int gap = 2;
+    const int displayH = display.height();
 
-    display.print(F("ANSA "));
-
-    display.print(rss.category());
-
-    display.setCursor(0, 8);
-
-    display.print(currentItem + 1);
-
-    display.print(F("/"));
-
-    display.print(count);
-
-    int drawX = static_cast<int>(scrollX);
-
-    display.setCursor(drawX, textY);
-
-    display.print(headline);
+    float y = scrollOffset;
+    size_t itemIndex = topIndex;
+    int drawn = 0;
+    while (y < displayH + lineHeight && drawn < static_cast<int>(count) + 2) {
+        String headline = rss.item(itemIndex);
+        if (!headline.length()) {
+            headline = F("Feed non disponibile");
+        }
+        int lines = (headline.length() + charsPerLine - 1) / charsPerLine;
+        if (lines < 1) {
+            lines = 1;
+        }
+        int itemHeight = lines * lineHeight + gap;
+        for (int line = 0; line < lines; ++line) {
+            int lineY = static_cast<int>(y + line * lineHeight);
+            if (lineY > -lineHeight && lineY < displayH) {
+                int startChar = line * charsPerLine;
+                int endChar = startChar + charsPerLine;
+                if (endChar > headline.length()) {
+                    endChar = headline.length();
+                }
+                String slice = headline.substring(startChar, endChar);
+                display.setCursor(0, lineY);
+                display.print(slice);
+            }
+        }
+        y += itemHeight;
+        itemIndex = (itemIndex + 1) % count;
+        drawn++;
+        if (itemIndex == topIndex) {
+            break;
+        }
+    }
 
     display.display();
 
-    scrollX -= scrollStep;
-
-    if (scrollX < -textWidth - 16.0f) {
-
-        currentItem = (currentItem + 1) % count;
-
-        stepDirty = true;
-
+    int currentHeight = itemHeightFor(rss.item(topIndex));
+    const float updatesPerItem = (12.0f * 1000.0f) / 120.0f;
+    float step = currentHeight / updatesPerItem;
+    if (step < 0.1f) {
+        step = 0.1f;
     }
-
+    scrollOffset -= step;
+    if (scrollOffset <= -currentHeight) {
+        scrollOffset += currentHeight;
+        topIndex = (topIndex + 1) % count;
+    }
 }
+
+
+
+
 
 
 
