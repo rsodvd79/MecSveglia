@@ -94,7 +94,7 @@ volatile bool forceRssRefresh = false;
 TaskHandle_t networkTaskHandle = NULL;
 
 WebServer server(80);
-classEye eye = classEye();
+classEye eye = classEye(&display);
 classButton Bottone = classButton(12, ButtonInputMode::BTN_PULLUP);
 classMeteo meteo = classMeteo();
 classScreen screen = classScreen(7);
@@ -513,61 +513,7 @@ void showScreen1() {
 }
 
 void showScreen2() {
-
-  display.clearDisplay();
-
-  switch (eye.Next()) {
-  case 0:
-    display.drawBitmap(0, 0, eye1, 128, 32, 1);
-    break;
-  case 1:
-    display.drawBitmap(0, 0, eye2, 128, 32, 1);
-    break;
-  case 2:
-    display.drawBitmap(0, 0, eye3, 128, 32, 1);
-    break;
-  case 3:
-    display.drawBitmap(0, 0, eye4, 128, 32, 1);
-    break;
-  case 4:
-    display.drawBitmap(0, 0, eye5, 128, 32, 1);
-    break;
-  case 5:
-    display.drawBitmap(0, 0, eye6, 128, 32, 1);
-    break;
-  case 6:
-    display.drawBitmap(0, 0, eye7, 128, 32, 1);
-    break;
-  case 7:
-    display.drawBitmap(0, 0, eye8, 128, 32, 1);
-    break;
-  case 8:
-    display.drawBitmap(0, 0, eye9, 128, 32, 1);
-    break;
-  case 9:
-    display.drawBitmap(0, 0, eye10, 128, 32, 1);
-    break;
-  case 10:
-    display.drawBitmap(0, 0, eye11, 128, 32, 1);
-    break;
-  case 11:
-    display.drawBitmap(0, 0, eye12, 128, 32, 1);
-    break;
-  case 12:
-    display.drawBitmap(0, 0, eye13, 128, 32, 1);
-    break;
-  case 13:
-    display.drawBitmap(0, 0, eye14, 128, 32, 1);
-    break;
-    // case 14:
-    //	display.drawBitmap(0, 0, eye15, 128, 32, 1);
-    //	break;
-    // case 15:
-    //	display.drawBitmap(0, 0, eye16, 128, 32, 1);
-    //	break;
-  }
-
-  display.display();
+  eye.loop();
 }
 
 void showScreen3() {
