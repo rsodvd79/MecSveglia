@@ -19,7 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-// Map LittleFS alias to SPIFFS on ESP32 (partition is 'spiffs')
+// Map LittleFS alias to SPIFFS on ESP32
 #if defined(ESP32)
 #define LittleFS SPIFFS
 #endif
@@ -88,6 +88,8 @@ static const uint32_t SYNC_RETRY_INTERVAL_MS = 60 * 1000;
 static bool tsep = true;
 // static bool keyp = false;
 
+volatile bool forceRssRefresh = false;
+
 // Network task handle
 TaskHandle_t networkTaskHandle = NULL;
 
@@ -113,24 +115,7 @@ static const ScreenOption SCREEN_OPTIONS[] = {
 static const size_t SCREEN_OPTION_COUNT =
     sizeof(SCREEN_OPTIONS) / sizeof(SCREEN_OPTIONS[0]);
 static uint8_t startScreen = 0;
-
-// Network task function
-void networkTask(void *parameter) {
-  for (;;) {
-    if (WiFi.status() == WL_CONNECTED) {
-      // Update RSS
-      if (refreshRssNow) {
-        rss.refresh();
-      }
-      // Update Meteo
-      if (showMeteoNow) {
-        meteo.Update();
-      }
-    }
-    // Delay to yield to other tasks (e.g., 1 second)
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
-  }
-}
+static const wifi_power_t AP_TX_POWER = WIFI_POWER_11dBm;
 
 // HTTP handlers prototypes
 void handleSetupGet();
@@ -144,6 +129,25 @@ void handleScreenStartGet();
 void handleScreenStartPost();
 void handleRssGet();
 void handleRssPost();
+
+// Network task function
+void networkTask(void *parameter) {
+  for (;;) {
+    if (WiFi.status() == WL_CONNECTED) {
+      // Update RSS
+      if (refreshRssNow || forceRssRefresh) {
+        forceRssRefresh = false;
+        rss.refresh();
+      }
+      // Update Meteo
+      if (showMeteoNow) {
+        meteo.Update();
+      }
+    }
+    // Delay to yield to other tasks (e.g., 1 second)
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+  }
+}
 
 void handleRoot() {
   digitalWrite(LED_BUILTIN, LOW);
@@ -233,6 +237,37 @@ static bool parseScreenIndex(const String &src, unsigned int &out) {
     return false;
   }
   out = static_cast<unsigned int>(value);
+  return true;
+}
+
+static bool startAccessPoint(IPAddress &apIP) {
+  // Bring down STA cleanly before starting AP to avoid Wi-Fi stack panics
+  WiFi.persistent(true);
+  WiFi.disconnect(true, true);
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_AP);
+
+  // Lower TX power to reduce brownout risk on USB-powered boards
+  WiFi.setTxPower(AP_TX_POWER);
+  delay(50);
+
+  if (!WiFi.softAP(mdns_name.c_str())) {
+    apIP = IPAddress(0, 0, 0, 0);
+    mdnsStarted = false;
+    return false;
+  }
+
+  delay(50);
+  apIP = WiFi.softAPIP();
+
+  // Optionally start mDNS also in AP mode so MDNS.update() is safe
+  if (MDNS.begin(mdns_name)) {
+    MDNS.addService("http", "tcp", 80);
+    mdnsStarted = true;
+  } else {
+    mdnsStarted = false;
+  }
+
   return true;
 }
 
@@ -933,7 +968,10 @@ void setup(void) {
   String rssCategory = classRss::kDefaultCategory;
   bool rssCategoryDirty = false;
 
-  if (LittleFS.begin()) {
+  // Try to mount LittleFS/SPIFFS with default mountpoint (no trailing slash)
+  if (!LittleFS.begin(false) && !LittleFS.begin(true)) {
+    AddScreenRows(F("FS KO"));
+  } else {
     AddScreenRows(F("FS OK"));
     if (LittleFS.exists("/SCREEN.TXT")) {
       File fscr = LittleFS.open("/SCREEN.TXT", "r");
@@ -1054,8 +1092,6 @@ void setup(void) {
     } else {
       AddScreenRows(F("FILE METEO_API.TXT KO"));
     }
-  } else {
-    AddScreenRows(F("FS KO"));
   }
 
   rss.setCategory(rssCategory);
@@ -1108,59 +1144,42 @@ void setup(void) {
       rss.refresh();
     } else {
       // Connection failed: fallback to AP mode with SSID = mdns_name
-      // Ensure any previously stored STA credentials are cleared to avoid boot
-      // loops
-      WiFi.persistent(true);
-      WiFi.disconnect(true);
-      WiFi.persistent(false);
-      WiFi.mode(WIFI_AP);
-      WiFi.softAP(mdns_name.c_str());
-      delay(100);
-      IPAddress apIP = WiFi.softAPIP();
-
-      // Optionally start mDNS also in AP mode so MDNS.update() is safe
-      if (MDNS.begin(mdns_name)) {
-        MDNS.addService("http", "tcp", 80);
-        mdnsStarted = true;
-      } else {
-        mdnsStarted = false;
-      }
+      IPAddress apIP(0, 0, 0, 0);
+      bool apStarted = startAccessPoint(apIP);
 
       display.clearDisplay();
       display.setCursor(0, 0);
+      if (apStarted) {
+        display.println(F("AP MODE"));
+        display.print(F("SSID: "));
+        display.println(mdns_name);
+        display.print(F("IP  : "));
+        display.println(apIP);
+      } else {
+        display.println(F("AP MODE KO"));
+        display.print(F("SSID: "));
+        display.println(mdns_name);
+      }
+      display.display();
+    }
+  } else {
+    // Fallback AP mode with SSID = mdns_name, open network
+    IPAddress apIP(0, 0, 0, 0);
+    bool apStarted = startAccessPoint(apIP);
+
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    if (apStarted) {
       display.println(F("AP MODE"));
       display.print(F("SSID: "));
       display.println(mdns_name);
       display.print(F("IP  : "));
       display.println(apIP);
-      display.display();
-    }
-  } else {
-    // Fallback AP mode with SSID = mdns_name, open network
-    // Proactively clear any saved STA credentials to avoid unintended reconnect
-    // attempts
-    WiFi.persistent(true);
-    WiFi.disconnect(true);
-    WiFi.persistent(false);
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP(mdns_name.c_str());
-    delay(100);
-    IPAddress apIP = WiFi.softAPIP();
-
-    if (MDNS.begin(mdns_name)) {
-      MDNS.addService("http", "tcp", 80);
-      mdnsStarted = true;
     } else {
-      mdnsStarted = false;
+      display.println(F("AP MODE KO"));
+      display.print(F("SSID: "));
+      display.println(mdns_name);
     }
-
-    display.clearDisplay();
-    display.setCursor(0, 0);
-    display.println(F("AP MODE"));
-    display.print(F("SSID: "));
-    display.println(mdns_name);
-    display.print(F("IP  : "));
-    display.println(apIP);
     display.display();
   }
 
@@ -1574,113 +1593,78 @@ void handleScreenStartPost() {
   server.send(200, F("application/json"), json);
 }
 void handleRssGet() {
+  if (!rss.lock(1000 / portTICK_PERIOD_MS)) {
+    server.send(503, F("text/plain"), F("Server busy"));
+    return;
+  }
 
   String json = F("{\"category\":\"");
-
   json += jsonEscape(rss.category());
-
   json += F("\",\"categories\":[");
-
   for (size_t i = 0; i < classRss::kCategoryCount; ++i) {
-
     if (i)
       json += ',';
-
     json += '\"';
-
     json += classRss::kCategories[i];
-
     json += '\"';
   }
-
   json += F("],\"items\":[");
-
   size_t count = rss.itemCount();
-
   for (size_t i = 0; i < count; ++i) {
-
     if (i)
       json += ',';
-
     json += '\"';
-
     json += jsonEscape(rss.item(i));
-
     json += '\"';
   }
-
   json += F("]}");
 
+  rss.unlock();
   server.send(200, F("application/json"), json);
 }
 
 void handleRssPost() {
-
   if (!server.hasArg("category")) {
-
     server.send(400, F("text/plain"), F("Parametro category mancante"));
-
     return;
   }
 
   String requested = classRss::normalizeCategory(server.arg("category"));
-
   if (!classRss::isValidCategory(requested)) {
-
     server.send(400, F("text/plain"), F("Categoria non valida"));
-
     return;
   }
 
-  if (!LittleFS.begin()) {
-
+  if (!LittleFS.begin(false)) {
     server.send(500, F("text/plain"), F("Filesystem non disponibile"));
-
     return;
   }
 
   File f = LittleFS.open("/RSS.TXT", "w");
-
   if (!f) {
-
     server.send(500, F("text/plain"), F("Errore scrittura RSS"));
+    return;
+  }
+  f.print(requested);
+  f.close();
 
+  // Update category safely
+  if (rss.lock(1000 / portTICK_PERIOD_MS)) {
+    rss.setCategory(requested);
+    rss.unlock();
+  } else {
+    server.send(503, F("text/plain"), F("Server busy"));
     return;
   }
 
-  f.print(requested);
-
-  f.close();
-
-  rss.setCategory(requested);
-
-  bool updated = rss.refresh();
+  // Trigger refresh in background task
+  forceRssRefresh = true; // Force refresh in next loop of networkTask
 
   String json = F("{\"category\":\"");
-
-  json += jsonEscape(rss.category());
-
-  json += F("\",\"updated\":");
-
-  json += updated ? F("true") : F("false");
-
-  json += F(",\"items\":[");
-
-  size_t count = rss.itemCount();
-
-  for (size_t i = 0; i < count; ++i) {
-
-    if (i)
-      json += ',';
-
-    json += '\"';
-
-    json += jsonEscape(rss.item(i));
-
-    json += '\"';
-  }
-
-  json += F("]}");
+  json += jsonEscape(requested);
+  json += F("\",\"updated\":true"); // We assume it will be updated soon
+  json +=
+      F(",\"items\":[]}"); // Don't return items immediately to avoid blocking
 
   server.send(200, F("application/json"), json);
 }
@@ -1699,7 +1683,7 @@ void handleTimezonePost() {
   }
 
   String newTz = normalizeTimezone(server.arg("tz"));
-  if (!LittleFS.begin()) {
+  if (!LittleFS.begin(false)) {
     server.send(500, F("text/plain"), F("Filesystem non disponibile"));
     return;
   }
@@ -1778,7 +1762,7 @@ void handleOled() {
 
 void handleFavicon() {
   // Serve /favicon.ico from LittleFS with proper content type and caching
-  if (!LittleFS.begin()) {
+  if (!LittleFS.begin(false)) {
     server.send(404, F("text/plain"), F(""));
     return;
   }

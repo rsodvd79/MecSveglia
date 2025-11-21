@@ -4,7 +4,6 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 
-
 const char *const classRss::kDefaultCategory = "tecnologia";
 const char *const classRss::kCategories[] = {
     "tecnologia", "politica", "mondo",   "economia",
@@ -50,7 +49,15 @@ bool classRss::refresh() {
   client.setInsecure();
   HTTPClient http;
 
-  String url = buildUrl(_category);
+  String url;
+  // Lock to safely read category
+  if (lock()) {
+    url = buildUrl(_category);
+    unlock();
+  } else {
+    return false;
+  }
+
   if (!http.begin(client, url)) {
     return false;
   }
@@ -174,6 +181,10 @@ String classRss::buildUrl(const String &category) {
 
 String classRss::cleanupField(const String &input) {
   String out = input;
+  // Strip possible CDATA markers that may leak through the stream parser
+  out.replace("]]>", " ");
+  out.replace("<![CDATA[", "");
+  out.replace("]]", " ");
   out.replace("&amp;", "&");
   out.replace("&apos;", "'");
   out.replace("&quot;", "\"");
