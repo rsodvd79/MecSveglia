@@ -9,6 +9,7 @@ classMeteo::classMeteo() {
 	description = "";
 	icon = "";
 	snow = 0;
+    _mutex = xSemaphoreCreateMutex();
 }
 
 void classMeteo::Update() {
@@ -34,6 +35,11 @@ void classMeteo::Update() {
 				filter[F("snow")][F("1h")] = true;
 				DeserializationError error = deserializeJson(jsonBuffer, http.getString(), DeserializationOption::Filter(filter));
 
+                if (!lock()) {
+                    http.end();
+                    return;
+                }
+
 				if (error) {
 					description = error.c_str();
 
@@ -58,21 +64,31 @@ void classMeteo::Update() {
 						snow = 0;
 					}
 				}
+                unlock();
 
 			}
 			else {
-				icon = String(F("ERR"));
+                if (lock()) {
+				    icon = String(F("ERR"));
+                    unlock();
+                }
 			}
 		}
 		else {
-			icon = String(F("ERR"));
+            if (lock()) {
+			    icon = String(F("ERR"));
+                unlock();
+            }
 		}
 
 		http.end();
 
 	}
 	else {
-		icon = String(F("ERR"));
+        if (lock()) {
+		    icon = String(F("ERR"));
+            unlock();
+        }
 	}
 
 }

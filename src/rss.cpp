@@ -1,191 +1,232 @@
 #include "rss.h"
 
+#include <HTTPClient.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
-#include <HTTPClient.h>
 
-const char* const classRss::kDefaultCategory = "tecnologia";
-const char* const classRss::kCategories[] = {
-    "tecnologia",
-    "politica",
-    "mondo",
-    "economia",
-    "sport",
-    "cultura",
-    "scienza",
-    "cronaca"
+
+const char *const classRss::kDefaultCategory = "tecnologia";
+const char *const classRss::kCategories[] = {
+    "tecnologia", "politica", "mondo",   "economia",
+    "sport",      "cultura",  "scienza", "cronaca"};
+
+struct CategoryFeedOverride {
+  const char *name;
+  const char *url;
 };
-
-struct CategoryFeedOverride { const char* name; const char* url; };
 static const CategoryFeedOverride kCategoryFeedOverrides[] = {
-    { "cronaca", "https://www.ansa.it/sito/notizie/cronaca/cronaca_rss.xml" },
-    { "politica", "https://www.ansa.it/sito/notizie/politica/politica_rss.xml" },
-    { "mondo", "https://www.ansa.it/sito/notizie/mondo/mondo_rss.xml" },
-    { "economia", "https://www.ansa.it/sito/notizie/economia/economia_rss.xml" },
-    { "sport", "https://www.ansa.it/sito/notizie/sport/sport_rss.xml" },
-    { "cultura", "https://www.ansa.it/sito/notizie/cultura/cultura_rss.xml" },
-    { "scienza", "https://www.ansa.it/canale_scienza_tecnica/notizie/scienzaetecnica_rss.xml" },
-    { "tecnologia", "https://www.ansa.it/canale_tecnologia/notizie/tecnologia_rss.xml" }
-};
-static const size_t kCategoryFeedOverridesCount = sizeof(kCategoryFeedOverrides) / sizeof(kCategoryFeedOverrides[0]);
+    {"cronaca", "https://www.ansa.it/sito/notizie/cronaca/cronaca_rss.xml"},
+    {"politica", "https://www.ansa.it/sito/notizie/politica/politica_rss.xml"},
+    {"mondo", "https://www.ansa.it/sito/notizie/mondo/mondo_rss.xml"},
+    {"economia", "https://www.ansa.it/sito/notizie/economia/economia_rss.xml"},
+    {"sport", "https://www.ansa.it/sito/notizie/sport/sport_rss.xml"},
+    {"cultura", "https://www.ansa.it/sito/notizie/cultura/cultura_rss.xml"},
+    {"scienza", "https://www.ansa.it/canale_scienza_tecnica/notizie/"
+                "scienzaetecnica_rss.xml"},
+    {"tecnologia",
+     "https://www.ansa.it/canale_tecnologia/notizie/tecnologia_rss.xml"}};
+static const size_t kCategoryFeedOverridesCount =
+    sizeof(kCategoryFeedOverrides) / sizeof(kCategoryFeedOverrides[0]);
 
-const size_t classRss::kCategoryCount = sizeof(classRss::kCategories) / sizeof(classRss::kCategories[0]);
+const size_t classRss::kCategoryCount =
+    sizeof(classRss::kCategories) / sizeof(classRss::kCategories[0]);
 
 void classRss::begin() {
-    _category = kDefaultCategory;
-    _itemCount = 0;
-    _lastFetchMillis = 0;
-}
-
-String classRss::normalizeCategory(const String& category) {
-    String trimmed = category;
-    trimmed.trim();
-    trimmed.toLowerCase();
-    trimmed.replace(' ', '_');
-    return trimmed;
-}
-
-bool classRss::isValidCategory(const String& category) {
-    String norm = normalizeCategory(category);
-    for (size_t i = 0; i < kCategoryCount; ++i) {
-        if (norm.equals(kCategories[i])) {
-            return true;
-        }
-    }
-    return false;
-}
-
-void classRss::setCategory(const String& category) {
-    String norm = normalizeCategory(category);
-    if (!isValidCategory(norm)) {
-        norm = kDefaultCategory;
-    }
-    _category = norm;
+  _category = kDefaultCategory;
+  _itemCount = 0;
+  _lastFetchMillis = 0;
+  if (!_mutex) {
+    _mutex = xSemaphoreCreateMutex();
+  }
 }
 
 bool classRss::refresh() {
-    if (WiFi.status() != WL_CONNECTED) {
-        return false;
-    }
-    String payload;
-    if (!fetchFeed(payload)) {
-        return false;
-    }
-    parseFeed(payload);
-    _lastFetchMillis = millis();
-    return _itemCount > 0;
-}
+  if (WiFi.status() != WL_CONNECTED) {
+    return false;
+  }
 
-const String& classRss::item(size_t index) const {
-    static String empty;
-    if (index >= _itemCount) {
-        empty = "";
-        return empty;
-    }
-    return _items[index];
-}
+  // Use a local client to stream
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
 
-bool classRss::fetchFeed(String& out) {
-    String url = buildUrl(_category);
-    WiFiClientSecure client;
-    client.setInsecure();
-    HTTPClient http;
-    if (!http.begin(client, url)) {
-        return false;
-    }
-    int code = http.GET();
-    if (code != HTTP_CODE_OK) {
-        http.end();
-        return false;
-    }
-    out = http.getString();
+  String url = buildUrl(_category);
+  if (!http.begin(client, url)) {
+    return false;
+  }
+
+  int code = http.GET();
+  if (code != HTTP_CODE_OK) {
     http.end();
-    return true;
-}
+    return false;
+  }
 
-void classRss::parseFeed(const String& payload) {
-    _itemCount = 0;
-    size_t pos = 0;
-    while (_itemCount < MAX_ITEMS) {
-        int itemStart = payload.indexOf("<item", pos);
-        if (itemStart < 0) {
-            break;
+  // Lock before modifying shared data
+  if (!lock()) {
+    http.end();
+    return false;
+  }
+
+  // Stream parsing
+  _itemCount = 0;
+  WiFiClient &stream = http.getStream();
+
+  // Simple state machine for XML parsing to avoid loading full string
+  // We look for <item> ... <title> ... </title> ... </item>
+  // This is a simplified parser for memory efficiency
+
+  String currentTag = "";
+  String title = "";
+  bool insideItem = false;
+  bool insideTitle = false;
+
+  while (http.connected() && (stream.available() || stream.connected())) {
+    if (!stream.available()) {
+      delay(1);
+      continue;
+    }
+
+    // Read until next tag start
+    String content = stream.readStringUntil('<');
+    if (insideTitle && insideItem) {
+      title += content;
+    }
+
+    if (stream.peek() != '/') {
+      // Opening tag
+      String tag = stream.readStringUntil('>');
+      // Handle CDATA
+      if (tag.startsWith("![CDATA[")) {
+        if (insideTitle && insideItem) {
+          // Extract CDATA content
+          int cdataEnd = tag.indexOf("]]");
+          if (cdataEnd >= 0) {
+            title += tag.substring(8, cdataEnd);
+          } else {
+            title += tag.substring(8);
+            // If CDATA is split, we might need more logic, but for now assume
+            // it's small enough or we catch the rest
+          }
         }
-        int titleOpen = payload.indexOf("<title", itemStart);
-        if (titleOpen < 0) {
-            pos = itemStart + 5;
-            continue;
+      } else {
+        // Normal tag
+        // Remove attributes if any
+        int space = tag.indexOf(' ');
+        if (space > 0)
+          tag = tag.substring(0, space);
+
+        if (tag.equalsIgnoreCase("item")) {
+          insideItem = true;
+          title = "";
+        } else if (tag.equalsIgnoreCase("title") && insideItem) {
+          insideTitle = true;
+          title = "";
         }
-        int titleStart = payload.indexOf('>', titleOpen);
-        if (titleStart < 0) {
-            break;
-        }
-        ++titleStart;
-        int titleEnd = payload.indexOf("</title>", titleStart);
-        if (titleEnd < 0) {
-            break;
-        }
-        String title = payload.substring(titleStart, titleEnd);
-        title.replace("<![CDATA[", "");
-        title.replace("]]>", "");
+      }
+    } else {
+      // Closing tag
+      stream.read(); // consume '/'
+      String tag = stream.readStringUntil('>');
+
+      if (tag.equalsIgnoreCase("title") && insideItem) {
+        insideTitle = false;
+        // Cleanup and store
         title = cleanupField(title);
-        if (!title.length()) {
-            pos = titleEnd + 8;
-            continue;
-        }
-        if (title.length() > 96) {
+        if (title.length() > 0) {
+          if (title.length() > 96) {
             title = title.substring(0, 93) + "...";
+          }
+          if (_itemCount < MAX_ITEMS) {
+            _items[_itemCount++] = title;
+          }
         }
-        _items[_itemCount++] = title;
-        pos = titleEnd + 8;
+      } else if (tag.equalsIgnoreCase("item")) {
+        insideItem = false;
+        if (_itemCount >= MAX_ITEMS)
+          break;
+      }
     }
+  }
+
+  http.end();
+  _lastFetchMillis = millis();
+  unlock();
+  return _itemCount > 0;
 }
 
-String classRss::buildUrl(const String& category) {
-    for (size_t i = 0; i < kCategoryFeedOverridesCount; ++i) {
-        if (category.equalsIgnoreCase(kCategoryFeedOverrides[i].name)) {
-            return String(kCategoryFeedOverrides[i].url);
-        }
+// fetchFeed and parseFeed are merged/replaced by the stream logic in refresh
+bool classRss::fetchFeed(String &out) { return false; }
+void classRss::parseFeed(const String &payload) {}
+
+String classRss::buildUrl(const String &category) {
+  for (size_t i = 0; i < kCategoryFeedOverridesCount; ++i) {
+    if (category.equalsIgnoreCase(kCategoryFeedOverrides[i].name)) {
+      return String(kCategoryFeedOverrides[i].url);
     }
-    String url = F("https://www.ansa.it/sito/notizie/");
-    url += category;
-    url += '/';
-    url += category;
-    url += F("_rss.xml");
-    return url;
+  }
+  String url = F("https://www.ansa.it/sito/notizie/");
+  url += category;
+  url += '/';
+  url += category;
+  url += F("_rss.xml");
+  return url;
 }
 
-String classRss::cleanupField(const String& input) {
-    String out = input;
-    out.replace("&amp;", "&");
-    out.replace("&apos;", "'");
-    out.replace("&quot;", "\"");
-    out.replace("&lt;", "<");
-    out.replace("&gt;", ">");
-    while (true) {
-        int tagStart = out.indexOf('<');
-        if (tagStart < 0) {
-            break;
-        }
-        int tagEnd = out.indexOf('>', tagStart);
-        if (tagEnd < 0) {
-            break;
-        }
-        out.remove(tagStart, (tagEnd - tagStart) + 1);
+String classRss::cleanupField(const String &input) {
+  String out = input;
+  out.replace("&amp;", "&");
+  out.replace("&apos;", "'");
+  out.replace("&quot;", "\"");
+  out.replace("&lt;", "<");
+  out.replace("&gt;", ">");
+  while (true) {
+    int tagStart = out.indexOf('<');
+    if (tagStart < 0) {
+      break;
     }
-    out.replace('\r', ' ');
-    out.replace('\n', ' ');
-    while (out.indexOf("  ") >= 0) {
-        out.replace("  ", " ");
+    int tagEnd = out.indexOf('>', tagStart);
+    if (tagEnd < 0) {
+      break;
     }
-    out.trim();
-    return out;
+    out.remove(tagStart, (tagEnd - tagStart) + 1);
+  }
+  out.replace('\r', ' ');
+  out.replace('\n', ' ');
+  while (out.indexOf("  ") >= 0) {
+    out.replace("  ", " ");
+  }
+  out.trim();
+  return out;
 }
 
+void classRss::setCategory(const String &category) {
+  if (isValidCategory(category)) {
+    _category = normalizeCategory(category);
+  }
+}
 
+bool classRss::isValidCategory(const String &category) {
+  for (size_t i = 0; i < kCategoryCount; ++i) {
+    if (category.equalsIgnoreCase(kCategories[i])) {
+      return true;
+    }
+  }
+  return false;
+}
 
+String classRss::normalizeCategory(const String &category) {
+  for (size_t i = 0; i < kCategoryCount; ++i) {
+    if (category.equalsIgnoreCase(kCategories[i])) {
+      return String(kCategories[i]);
+    }
+  }
+  return String(kDefaultCategory);
+}
 
-
-
-
-
+const String &classRss::item(size_t index) const {
+  if (index < _itemCount) {
+    return _items[index];
+  }
+  static const String empty = "";
+  return empty;
+}

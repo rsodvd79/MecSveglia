@@ -31,4 +31,14 @@ private:
     String _items[MAX_ITEMS];
     size_t _itemCount = 0;
     unsigned long _lastFetchMillis = 0;
+    SemaphoreHandle_t _mutex = NULL;
+
+public:
+    bool lock(TickType_t wait = portMAX_DELAY) {
+        if (!_mutex) return true; // Should be initialized
+        return xSemaphoreTake(_mutex, wait) == pdTRUE;
+    }
+    void unlock() {
+        if (_mutex) xSemaphoreGive(_mutex);
+    }
 };

@@ -2,7 +2,7 @@ MecSveglia — ESP32-S3 Zero clock/desk companion
 
 - Piattaforma: ESP32‑S3 (Waveshare ESP32‑S3‑Zero)
 - Display: OLED SSD1306 128×32 I2C (addr 0x3C)
-- Funzioni: ora via NTP (Europe/Rome), meteo OpenWeatherMap, pagine web su SPIFFS/LittleFS, mDNS, OTA, animazioni (occhi, Game of Life, triangolo), ciclo schermi automatico, attenuazione notturna e anti burn‑in.
+- Funzioni: ora via NTP (Europe/Rome), meteo OpenWeatherMap, notizie RSS ANSA, pagine web su LittleFS, mDNS, OTA, animazioni (occhi, Game of Life, triangolo), ciclo schermi automatico, attenuazione notturna e anti burn‑in.
 
 Pinout della board: vedi immagine in `info/esp32-S3-Zero-Waveshare-pinout-low.jpg`.
 
@@ -16,9 +16,16 @@ Requisiti
 Struttura progetto
 
 - Codice sorgente: `src/`
-- File web e configurazione su filesystem: `data/` (caricati su SPIFFS)
+- File web e configurazione su filesystem: `data/` (caricati su LittleFS)
 - Definizioni scheda e pinout: `info/`
 - Modelli per stampa 3D: `stl/` (es. `stl/mec01.stl`, `stl/mac02.stl`)
+
+Novità Versione Corrente
+
+- **Multitasking FreeRTOS**: Le operazioni di rete (RSS, Meteo) sono gestite in un task separato per evitare blocchi del display.
+- **LittleFS**: Migrazione da SPIFFS a LittleFS per una gestione file più efficiente e moderna.
+- **RSS Streaming**: Parsing ottimizzato dei feed RSS per ridurre l'uso della memoria e prevenire frammentazione.
+- **Thread Safety**: Accesso ai dati condivisi protetto da mutex.
 
 Configurazione scheda in PlatformIO
 
@@ -44,13 +51,13 @@ File `platformio.ini`
 - Ambiente attivo: `[env:esp32-s3-fh4r2]`
 - Piattaforma: `espressif32`
 - Framework: `arduino`
-- File system: SPIFFS con partizioni da `partitions.csv`
+- File system: **LittleFS** con partizioni da `partitions.csv`
 - Flag principali: USB CDC su boot abilitato
 
 Caricamento firmware e filesystem
 
 - Firmware: compila e carica con PlatformIO (Upload)
-- File web: carica la partizione SPIFFS con “Upload Filesystem Image”
+- File web: carica la partizione LittleFS con “Upload Filesystem Image” (**Nota: necessario ricaricare se si proviene da SPIFFS**)
 
 Contenuti consigliati in `data/`
 
@@ -58,14 +65,14 @@ Contenuti consigliati in `data/`
 - `SETUP.HTM` pagina di configurazione Wi‑Fi/mdns
 - `WIFI_SID.TXT` e `WIFI_PWD.TXT` credenziali Wi‑Fi
 - `MDNS_NM.TXT` nome mDNS/SSID AP di fallback (default `MECSVEGLIA`)
-- `SCREEN.TXT` numero schermo di avvio (0..6, opzionale)
+- `SCREEN.TXT` numero schermo di avvio (0..7, opzionale)
 - `METEO_API.TXT` query string di OpenWeatherMap dopo il `?` (esempio: `id=3175384&cnt=1&units=metric&lang=it&appid=XXXX`)
 
 Uso rapido
 
-- Avvio in STA: se presenti SSID/PWD su SPIFFS, il dispositivo si collega al Wi‑Fi e risponde a `http://<mdns>.local` (es. `http://MECSVEGLIA.local`).
+- Avvio in STA: se presenti SSID/PWD su LittleFS, il dispositivo si collega al Wi‑Fi e risponde a `http://<mdns>.local` (es. `http://MECSVEGLIA.local`).
 - Fallback AP: se mancano credenziali o la rete non è disponibile, crea un AP aperto con SSID `<mdns>` e mostra l’IP sul display.
-- Endpoint utili: `/` home, `/setup`, `/status` (JSON), `/wifi`, `/time`, `/eyes`, `/meteo`, `/tri`, `/gol`, `/cycle`, `/oled`.
+- Endpoint utili: `/` home, `/setup`, `/status` (JSON), `/wifi`, `/time`, `/eyes`, `/meteo`, `/tri`, `/gol`, `/cycle`, `/oled`, `/rss`.
 
 Hardware
 
