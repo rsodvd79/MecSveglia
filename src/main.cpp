@@ -71,11 +71,13 @@ static esp8266::polledTimeout::periodicMs showSTimeNow(500);
 static esp8266::polledTimeout::periodicMs showWifiNow(500);
 static esp8266::polledTimeout::periodicMs showEyesNow(125);
 static esp8266::polledTimeout::periodicMs showMeteoNow(1000 * 30);
+static esp8266::polledTimeout::periodicMs updateMeteoNow(1000 * 30);
 static esp8266::polledTimeout::periodicMs showCicloScreenNow(1000 * 60);
 static esp8266::polledTimeout::periodicMs showGOLNow(80);
 static esp8266::polledTimeout::periodicMs showTriNow(60);
 static esp8266::polledTimeout::periodicMs showRssScrollNow(120);
 static esp8266::polledTimeout::periodicMs refreshRssNow(1000 * 60 * 60);
+static esp8266::polledTimeout::periodicMs wifiReconnectNow(1000 * 15);
 static esp8266::polledTimeout::periodicMs adjustBrightnessNow(1000 * 60);
 static esp8266::polledTimeout::periodicMs invertPulseNow(1000 * 60 * 30);
 static esp8266::polledTimeout::periodicMs ensureTimeNow(1000 * 15);
@@ -132,18 +134,31 @@ void handleRssPost();
 
 // Network task function
 void networkTask(void *parameter) {
+  wl_status_t lastStatus = WL_IDLE_STATUS;
   for (;;) {
-    if (WiFi.status() == WL_CONNECTED) {
+    wl_status_t status = WiFi.status();
+    if (status == WL_CONNECTED) {
       // Update RSS
       if (refreshRssNow || forceRssRefresh) {
         forceRssRefresh = false;
         rss.refresh();
       }
       // Update Meteo
-      if (showMeteoNow) {
+      if (updateMeteoNow) {
         meteo.Update();
       }
+    } else {
+      // If we're meant to be in STA mode, try to recover the link periodically
+      bool staMode = (WiFi.getMode() & WIFI_MODE_STA);
+      if (staMode) {
+        if (lastStatus == WL_CONNECTED) {
+          WiFi.reconnect();
+        } else if (wifiReconnectNow) {
+          WiFi.reconnect();
+        }
+      }
     }
+    lastStatus = status;
     // Delay to yield to other tasks (e.g., 1 second)
     vTaskDelay(1000 / portTICK_PERIOD_MS);
   }
@@ -1075,6 +1090,8 @@ void setup(void) {
     }
 
     if (WiFi.status() == WL_CONNECTED) {
+      // Allow the stack to recover automatically if the link drops later
+      WiFi.setAutoReconnect(true);
       showScreen0(false);
 
       if (MDNS.begin(mdns_name)) {
