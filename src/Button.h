@@ -17,6 +17,7 @@ enum ButtonInputMode {
 class classButton {
 private:
 	int Pin;
+	ButtonInputMode _mode;
 	unsigned long lastDebounceTime;
 	long debounceDelay;
 	bool buttonState;

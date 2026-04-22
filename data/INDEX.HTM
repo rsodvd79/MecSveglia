@@ -93,6 +93,11 @@
       transform: translateY(0);
     }
 
+    button.on {
+      background: #f59e0b;
+      color: #2d1a00;
+    }
+
     button.primary {
       background: var(--accent);
       color: #052e16;
@@ -210,9 +215,10 @@
         <button class="primary" data-endpoint="eyes">Eyes</button>
         <button class="primary" data-endpoint="meteo">Meteo</button>
         <button class="primary" data-endpoint="gol">Game of Life</button>
+        <button class="primary" data-endpoint="golreset" title="Reinizializza la griglia con celle casuali">↺ Reset GOL</button>
         <button class="primary" data-endpoint="tri">Triangolo</button>
-        <button class="primary" data-endpoint="cycle">Ciclo schermi</button>
-        <button class="primary" data-endpoint="rss">RSS ANSA</button>
+        <button class="primary" id="btn-cycle" data-endpoint="cycle">Ciclo schermi</button>
+        <button class="primary" data-endpoint="rssscreen">RSS ANSA</button>
         <button class="primary" id="btn-setup" title="Configura la rete Wi‑Fi">Setup Wi‑Fi</button>
       </div>
       <div id="status" class="status" aria-live="polite"></div>
@@ -388,6 +394,12 @@
         mdnsEl.textContent = j.mdns || '—';
         rssiEl.textContent = (j.rssi !== undefined ? j.rssi + ' dBm (' + (j.quality || 0) + '%)' : '—');
         modeEl.textContent = j.mode || '—';
+        const btnCycle = document.getElementById('btn-cycle');
+        if (btnCycle) {
+          const on = !!j.cycle;
+          btnCycle.classList.toggle('on', on);
+          btnCycle.textContent = on ? '⏹ Stop ciclo' : 'Ciclo schermi';
+        }
         infoStatus.className = 'status ok';
         infoStatus.textContent = 'Stato aggiornato';
       } catch (e) {
@@ -563,7 +575,10 @@
       if (!btn) return;
       const ep = btn.getAttribute('data-endpoint');
       disableButtons(true);
-      callEndpoint(ep).finally(() => disableButtons(false));
+      callEndpoint(ep).finally(() => {
+        disableButtons(false);
+        setTimeout(refreshInfo, 300);
+      });
     });
 
     // aggiorna lo stato all'avvio e ogni 30s
@@ -612,6 +627,7 @@
             await res.text();
           }
           setScreenStatus('Schermata di avvio salvata', true);
+          setTimeout(refreshInfo, 300);
         } catch (e) {
           setScreenStatus('Errore salvataggio: ' + (e.message || 'errore'), false);
         } finally {

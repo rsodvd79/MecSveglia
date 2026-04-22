@@ -2,7 +2,7 @@ MecSveglia — ESP32-S3 Zero clock/desk companion
 
 - Piattaforma: ESP32‑S3 (Waveshare ESP32‑S3‑Zero)
 - Display: OLED SSD1306 128×32 I2C (addr 0x3C)
-- Funzioni: ora via NTP (Europe/Rome), meteo OpenWeatherMap, notizie RSS ANSA, pagine web su LittleFS, mDNS, OTA, animazioni (occhi, Game of Life, triangolo), ciclo schermi automatico, attenuazione notturna e anti burn‑in.
+- Funzioni: ora via NTP (Europe/Rome), meteo OpenWeatherMap, notizie RSS ANSA, pagine web su LittleFS, mDNS, OTA, animazioni (occhi, Game of Life, triangolo), ciclo schermi automatico, attenuazione notturna.
 
 Pinout della board: vedi immagine in `info/esp32-S3-Zero-Waveshare-pinout-low.jpg`.
 
@@ -26,6 +26,11 @@ Novità Versione Corrente
 - **LittleFS**: Migrazione da SPIFFS a LittleFS per una gestione file più efficiente e moderna.
 - **RSS Streaming**: Parsing ottimizzato dei feed RSS per ridurre l'uso della memoria e prevenire frammentazione.
 - **Thread Safety**: Accesso ai dati condivisi protetto da mutex.
+- **Game of Life migliorato**: Inizializzazione casuale ad ogni avvio; rilevamento stasi (grid statica, oscillatori periodici, estinzione) con iniezione automatica di blinker casuali per mantenere la simulazione viva.
+- **Ciclo schermi toggle**: Il pulsante "Ciclo schermi" nell'interfaccia web è ora un toggle ON/OFF con feedback visivo (colore ambra quando attivo). Selezionare una schermata specifica dall'interfaccia web disattiva automaticamente il ciclo.
+- **Endpoint `/cycle` migliorato**: Alterna lo stato del ciclo e restituisce `{"cycle": true/false}`; `/status` include ora il campo `cycle`.
+- **Endpoint aggiuntivi**: `/golreset` (re-popola il Game of Life), `/rssscreen` (commuta al feed RSS).
+- **Meteo**: Corretti campi `description` e `icon` che comparivano come `null` per via del filtro JSON troppo piccolo.
 
 Configurazione scheda in PlatformIO
 
@@ -72,7 +77,7 @@ Uso rapido
 
 - Avvio in STA: se presenti SSID/PWD su LittleFS, il dispositivo si collega al Wi‑Fi e risponde a `http://<mdns>.local` (es. `http://MECSVEGLIA.local`).
 - Fallback AP: se mancano credenziali o la rete non è disponibile, crea un AP aperto con SSID `<mdns>` e mostra l’IP sul display.
-- Endpoint utili: `/` home, `/setup`, `/status` (JSON), `/wifi`, `/time`, `/eyes`, `/meteo`, `/tri`, `/gol`, `/cycle`, `/oled`, `/rss`.
+- Endpoint utili: `/` home, `/setup`, `/status` (JSON con `cycle`), `/wifi`, `/time`, `/eyes`, `/meteo`, `/tri`, `/gol`, `/golreset`, `/cycle` (toggle), `/rssscreen`, `/oled`, `/rss`.
 
 Hardware
 
@@ -86,5 +91,6 @@ Stampa 3D
 Note
 
 - Il progetto abilita OTA: gli aggiornamenti possono essere inviati via rete quando il dispositivo è connesso.
-- Il display si attenua di notte e applica un breve invert periodico per ridurre il burn‑in.
+- Il display si attenua di notte (22:00–06:59) tramite `display.dim(true)`.
+- L'inversione periodica anti burn‑in è disabilitata.
 

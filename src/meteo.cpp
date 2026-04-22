@@ -19,21 +19,23 @@ void classMeteo::Update() {
 	String URL = F("http://api.openweathermap.org/data/2.5/weather?");
 
 	if (URL.concat(Api) && http.begin(client, URL)) {
+		http.setTimeout(5000);
 		int httpCode = http.GET();
 
 		if (httpCode > 0) {
 			if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_MOVED_PERMANENTLY) {
 
-				DynamicJsonDocument jsonBuffer(2048);
-				// Filter only required fields to reduce memory usage
-				DynamicJsonDocument filter(256);
+				StaticJsonDocument<512> jsonBuffer;
+				// Filter only required fields to reduce memory usage.
+				// Dimensione calcolata: 12 nodi * 16 bytes/nodo + 8 overhead ~= 200 bytes.
+				StaticJsonDocument<256> filter;
 				filter[F("main")][F("temp")] = true;
 				filter[F("main")][F("humidity")] = true;
 				filter[F("wind")][F("speed")] = true;
 				filter[F("weather")][0][F("description")] = true;
 				filter[F("weather")][0][F("icon")] = true;
 				filter[F("snow")][F("1h")] = true;
-				DeserializationError error = deserializeJson(jsonBuffer, http.getString(), DeserializationOption::Filter(filter));
+				DeserializationError error = deserializeJson(jsonBuffer, http.getStream(), DeserializationOption::Filter(filter));
 
                 if (!lock()) {
                     http.end();
@@ -50,11 +52,11 @@ void classMeteo::Update() {
 					wind_speed = jsonBuffer[F("wind")][F("speed")];
 					
 					String d = jsonBuffer[F("weather")][0][F("description")];
-					description = d; 
+					description = (d == F("null") || d.isEmpty()) ? F("") : d;
 					description.toUpperCase();
 
 					String i = jsonBuffer[F("weather")][0][F("icon")];
-					icon = i; 
+					icon = (i == F("null") || i.isEmpty()) ? F("ERR") : i;
 					icon.toUpperCase();
 
 					if (icon == "13D" || icon == "13N") { // snow

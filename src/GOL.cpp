@@ -3,8 +3,15 @@
 
 classGOL::classGOL() {
 
-	Genesi();
+	Popola();
 
+}
+
+void classGOL::_resetHistory() {
+	_prevHash = 0;
+	_prevPrevHash = 0;
+	_stableCount = 0;
+	Spontanei = false;
 }
 
 void classGOL::Genesi() {
@@ -14,72 +21,109 @@ void classGOL::Genesi() {
 			Mondo[X][Y] = false;
 		}
 	}
+	_resetHistory();
 
 }
 
 void classGOL::Popola() {
-	randomSeed(analogRead(0));
+	randomSeed(esp_random());
 
 	for (byte X = 0; X < MondoLarghezza; X++) {
 		for (byte Y = 0; Y < MondoAltezza; Y++) {
 			Mondo[X][Y] = (random(0, 100) >= 50);
 		}
 	}
+	_resetHistory();
 
+}
+
+// Inserisce un blinker (3 celle allineate, orizzontale o verticale) in una
+// posizione libera casuale. Restituisce true se il posizionamento ha avuto successo.
+bool classGOL::_inserisciBlinker() {
+	bool horiz = random(0, 2);
+	unsigned int c = 0;
+
+	if (horiz) {
+		do {
+			byte X = random(1, MondoLarghezza - 1); // 1..62: centro con margine per X±1
+			byte Y = random(0, MondoAltezza);        // 0..31
+			if (!Mondo[X - 1][Y] && !Mondo[X][Y] && !Mondo[X + 1][Y]) {
+				Mondo[X - 1][Y] = Mondo[X][Y] = Mondo[X + 1][Y] = true;
+				return true;
+			}
+		} while (++c < (unsigned)(MondoLarghezza * MondoAltezza));
+	} else {
+		do {
+			byte X = random(0, MondoLarghezza);      // 0..63
+			byte Y = random(1, MondoAltezza - 1);    // 1..30: centro con margine per Y±1
+			if (!Mondo[X][Y - 1] && !Mondo[X][Y] && !Mondo[X][Y + 1]) {
+				Mondo[X][Y - 1] = Mondo[X][Y] = Mondo[X][Y + 1] = true;
+				return true;
+			}
+		} while (++c < (unsigned)(MondoLarghezza * MondoAltezza));
+	}
+	return false;
+}
+
+// Hash FNV-1a sulla griglia per rilevare stati identici (oscillatori periodici).
+uint32_t classGOL::_gridHash(bool grid[][MondoAltezza]) {
+	uint32_t h = 2166136261UL;
+	for (byte x = 0; x < MondoLarghezza; x++) {
+		for (byte y = 0; y < MondoAltezza; y++) {
+			h ^= (uint32_t)(grid[x][y] ? 1 : 0);
+			h *= 16777619UL;
+		}
+	}
+	return h;
 }
 
 void classGOL::Update() {
 	Generazione++;
-	unsigned int celle_vecchie = 0;
-
-	for (byte X = 0; X < MondoLarghezza; X++) {
-		for (byte Y = 0; Y < MondoAltezza; Y++) {
-			if (Mondo[X][Y]) {
-				celle_vecchie++;
-			};
-		}
-	}
 
 	if (Spontanei) {
 		Spontanei = false;
-		randomSeed(analogRead(0));
-		unsigned int c = 0;
-
-		do {
-			c++;
-			byte X = random(1, MondoLarghezza - 2);
-			byte Y = random(0, MondoAltezza - 1);
-
-			if (!Mondo[X - 1][Y] && !Mondo[X][Y] && !Mondo[X + 1][Y]) {
-				Mondo[X - 1][Y] = true;
-				Mondo[X][Y] = true;
-				Mondo[X + 1][Y] = true;
-				break;
-			}
-
-		} while (c < MondoLarghezza * MondoAltezza);
-
+		randomSeed(esp_random());
+		for (int i = 0; i < 3; i++) {
+			_inserisciBlinker();
+		}
+		// Reset history: il confronto con generazioni precedenti non è più valido
+		// dopo aver modificato manualmente la griglia.
+		_prevHash = 0;
+		_prevPrevHash = 0;
+		_stableCount = 0;
 	}
 
 	unsigned int celle_nuove = 0;
-	bool NewMondo[MondoLarghezza][MondoAltezza]{};
+	memset(NewMondo, 0, sizeof(NewMondo));
 
 	for (byte X = 0; X < MondoLarghezza; X++) {
 		for (byte Y = 0; Y < MondoAltezza; Y++) {
 			NewMondo[X][Y] = calcolaCella(X, Y);
 			if (NewMondo[X][Y]) {
 				celle_nuove++;
-			};
+			}
 		}
 	}
 
-	Spontanei = (celle_vecchie == celle_nuove) || (Generazione == 0);
+	uint32_t newHash = _gridHash(NewMondo);
 
-	for (byte X = 0; X < MondoLarghezza; X++) {
-		for (byte Y = 0; Y < MondoAltezza; Y++) {
-			Mondo[X][Y] = NewMondo[X][Y];
+	if (celle_nuove == 0 || newHash == _prevHash) {
+		// Estinzione o stato statico: stimolo immediato
+		Spontanei = true;
+	} else if (newHash == _prevPrevHash) {
+		// Oscillatore periodo-2: conta le generazioni consecutive
+		// prima di iniettare nuovi blinker (evita loop rapido)
+		if (++_stableCount >= 30) {
+			Spontanei = true;
 		}
+	} else {
+		_stableCount = 0;
 	}
+
+	_prevPrevHash = _prevHash;
+	_prevHash = newHash;
+
+	memcpy(Mondo, NewMondo, sizeof(Mondo));
 
 }
 

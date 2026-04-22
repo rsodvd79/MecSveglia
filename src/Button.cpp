@@ -7,6 +7,7 @@ classButton::classButton(int _Pin, ButtonInputMode _Tipo) {
 	lastButtonState = false;
 	State = false;
 	Pin = _Pin;
+	_mode = _Tipo;
 
     switch (_Tipo)
     {
@@ -31,7 +32,8 @@ void classButton::Update() {
 	unsigned long currentTime = millis();
 	byte reading = false;
 
-	if (digitalRead(Pin) == LOW) {
+	int activeLevel = (_mode == ButtonInputMode::BTN_PULLUP) ? LOW : HIGH;
+	if (digitalRead(Pin) == activeLevel) {
 		reading = true;
 	}
 

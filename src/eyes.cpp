@@ -268,7 +268,7 @@ bool classEye::stepAnimation(unsigned long now) {
 
 void classEye::loop() {
   unsigned long now = millis();
-  if (now < nextUpdateMs) {
+  if ((long)(now - nextUpdateMs) < 0) {
     return;
   }
 

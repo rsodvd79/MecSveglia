@@ -7,7 +7,9 @@
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <Wire.h>
+#include <atomic>
 #include <esp_sntp.h>
+#include <esp_task_wdt.h>
 #include <sys/time.h> // struct timeval
 #include <time.h>     // time() ctime()
 
@@ -81,16 +83,24 @@ static esp8266::polledTimeout::periodicMs wifiReconnectNow(1000 * 15);
 static esp8266::polledTimeout::periodicMs adjustBrightnessNow(1000 * 60);
 static esp8266::polledTimeout::periodicMs invertPulseNow(1000 * 60 * 30);
 static esp8266::polledTimeout::periodicMs ensureTimeNow(1000 * 15);
-static bool timeSyncedOnce = false;
+
+// Named constants for intervals and sizes
+static const uint32_t NETWORK_TASK_STACK    = 8192;
+static const uint32_t AP_STA_RETRY_MS       = 5UL * 60 * 1000;  // 5 min
+static const uint32_t WDT_TIMEOUT_SEC       = 30;
+static const uint32_t INVERT_FLASH_DURATION = 250; // ms
+static const uint32_t BTN_FLASH_DURATION    = 200; // ms
+
 static time_t lastSuccessfulSync = 0;
 static uint32_t lastTimeSyncAttemptMs = 0;
+static bool timeSyncedOnce = false;
 static const time_t MIN_VALID_EPOCH = 1672531200; // 2023-01-01T00:00:00Z
 static const time_t RESYNC_INTERVAL_SEC = 12 * 60 * 60;
 static const uint32_t SYNC_RETRY_INTERVAL_MS = 60 * 1000;
 static bool tsep = true;
 // static bool keyp = false;
 
-volatile bool forceRssRefresh = false;
+std::atomic<bool> forceRssRefresh{false};
 
 // Network task handle
 TaskHandle_t networkTaskHandle = NULL;
@@ -155,6 +165,16 @@ void networkTask(void *parameter) {
           WiFi.reconnect();
         } else if (wifiReconnectNow) {
           WiFi.reconnect();
+        }
+      }
+      // If stuck in AP mode with valid credentials, retry STA every 5 minutes
+      if (WiFi.getMode() == WIFI_AP && ssid.length() > 0 && password.length() > 0) {
+        static unsigned long apStaRetryMs = 0;
+        if (millis() - apStaRetryMs >= AP_STA_RETRY_MS) {
+          apStaRetryMs = millis();
+          WiFi.mode(WIFI_STA);
+          WiFi.setAutoReconnect(false);
+          WiFi.begin(ssid.c_str(), password.c_str());
         }
       }
     }
@@ -312,6 +332,19 @@ String normalizeTimezone(const String &tz) {
   if (!trimmed.length()) {
     return String(DEFAULT_TZ);
   }
+  // Basic POSIX TZ validation: must contain at least one letter (zone name)
+  // and must not contain obvious garbage (control chars, semicolons)
+  bool hasLetter = false;
+  for (size_t i = 0; i < trimmed.length(); i++) {
+    char c = trimmed[i];
+    if (isalpha(static_cast<unsigned char>(c))) { hasLetter = true; }
+    if (c < 0x20 || c == ';') {
+      return String(DEFAULT_TZ); // garbage detected
+    }
+  }
+  if (!hasLetter) {
+    return String(DEFAULT_TZ);
+  }
   return trimmed;
 }
 
@@ -322,18 +355,18 @@ String jsonEscape(const String &input) {
     char c = input[i];
     switch (c) {
     case '\\':
-      out += "\\";
+      out += "\\\\";
       break;
     case '"':
-      out += "\"";
+      out += "\\\"";
       break;
     case '\n':
-      out += "\n";
+      out += "\\n";
       break;
     case '\r':
       break;
     case '\t':
-      out += "\t";
+      out += "\\t";
       break;
     default:
       if (static_cast<unsigned char>(c) < 0x20) {
@@ -593,8 +626,6 @@ void showScreen3() {
   } else if (meteo.icon == F("ERR")) { // mist
     display.drawBitmap(128 - 32, 0, MeteoErr, 32, 32, 1);
   }
-
-  display.display();
 
   display.display();
   meteo.unlock();
@@ -859,35 +890,21 @@ void showScreen7() {
   rss.unlock();
 }
 
-void showScreenInit(unsigned int s) {
-
-  switch (screen.Current(s)) {
-  case 0:
-    showScreen0(true);
-    break;
-  case 1:
-    showScreen1();
-    break;
-  case 2:
-    showScreen2();
-    break;
-  case 3:
-    showScreen3();
-    break;
-  case 4:
-    // GOL.Genesi();
-    showScreen4();
-    break;
-  case 5:
-    showScreen5();
-    break;
-  case 6:
-    showScreen7();
-    break;
-  case 7:
-    showScreen6();
-    break;
+void renderScreenNow(unsigned int s) {
+  switch (s) {
+  case 0: showScreen0(true); break;
+  case 1: showScreen1();     break;
+  case 2: showScreen2();     break;
+  case 3: showScreen3();     break;
+  case 4: showScreen4();     break;
+  case 5: showScreen5();     break;
+  case 6: showScreen7();     break;
+  case 7: showScreen6();     break;
   }
+}
+
+void showScreenInit(unsigned int s) {
+  renderScreenNow(screen.Current(s));
 }
 
 void AddScreenRows(String r) {
@@ -1156,12 +1173,12 @@ void setup(void) {
     String json = F("{");
     json += F("\"ssid\":");
     json += '"';
-    json += ssid;
+    json += jsonEscape(ssid);
     json += '"';
     json += F(",");
     json += F("\"mdns\":");
     json += '"';
-    json += mdns_name;
+    json += jsonEscape(mdns_name);
     json += '"';
     json += F("}");
     server.send(200, F("application/json"), json);
@@ -1172,45 +1189,66 @@ void setup(void) {
   server.on(F("/screen/start"), HTTP_POST, handleScreenStartPost);
   server.on(F("/rss"), HTTP_GET, handleRssGet);
   server.on(F("/rss"), HTTP_POST, handleRssPost);
+  server.on(F("/rssscreen"), []() {
+    CicloScreen = false;
+    showScreenInit(6);
+    server.send(200, F("text/plain"), F(""));
+  });
   server.on(F("/setup"), HTTP_POST, handleSetupPost);
 
   server.onNotFound(handleNotFound);
 
   server.on(F("/wifi"), []() {
+    CicloScreen = false;
     showScreenInit(0);
     server.send(200, F("text/plain"), F(""));
   });
 
   server.on(F("/time"), []() {
+    CicloScreen = false;
     showScreenInit(1);
     server.send(200, F("text/plain"), F(""));
   });
 
   server.on(F("/eyes"), []() {
+    CicloScreen = false;
     showScreenInit(2);
     server.send(200, F("text/plain"), F(""));
   });
 
   server.on(F("/meteo"), []() {
+    CicloScreen = false;
     showScreenInit(3);
     server.send(200, F("text/plain"), F(""));
   });
 
   server.on(F("/tri"), []() {
+    CicloScreen = false;
     showScreenInit(5);
     server.send(200, F("text/plain"), F(""));
   });
 
   server.on(F("/gol"), []() {
+    CicloScreen = false;
+    showScreenInit(4);
+    server.send(200, F("text/plain"), F(""));
+  });
+
+  server.on(F("/golreset"), []() {
+    CicloScreen = false;
+    GOL.Popola();
     showScreenInit(4);
     server.send(200, F("text/plain"), F(""));
   });
 
   server.on(F("/cycle"), []() {
-    // Enable auto cycle mode and show marker screen
-    CicloScreen = true;
-    showScreenInit(7);
-    server.send(200, F("text/plain"), F(""));
+    // Toggle auto-cycle mode
+    CicloScreen = !CicloScreen;
+    showScreenInit(CicloScreen ? 7 : 1);
+    String json = F("{\"cycle\":");
+    json += CicloScreen ? F("true") : F("false");
+    json += F("}");
+    server.send(200, F("application/json"), json);
   });
 
   // status endpoint
@@ -1306,14 +1344,19 @@ void setup(void) {
   // Create Network Task
   xTaskCreate(networkTask,       // Function
               "NetworkTask",     // Name
-              8192,              // Stack size (increased for SSL/JSON)
+              NETWORK_TASK_STACK, // Stack size
               NULL,              // Parameters
               1,                 // Priority (low)
               &networkTaskHandle // Handle
   );
+
+  // Enable hardware watchdog: reset if main loop hangs for WDT_TIMEOUT_SEC
+  esp_task_wdt_init(WDT_TIMEOUT_SEC, true);
+  esp_task_wdt_add(NULL);
 }
 
 void loop(void) {
+  esp_task_wdt_reset();
   ArduinoOTA.handle();
   server.handleClient();
   Bottone.Update();
@@ -1338,27 +1381,28 @@ void loop(void) {
     }
   }
 
-  // Short inversion pulse every 30 minutes to mitigate burn-in
-  if (invertPulseNow) {
+  // Burn-in inversion pulse disabled
+
+  // Button press: brief visual flash then advance screen (non-blocking)
+  static unsigned long btnFlashEndMs = 0;
+  static bool btnPendingNav = false;
+  if (Bottone.Pressed() && btnFlashEndMs == 0) {
     display.invertDisplay(true);
     display.display();
-    delay(250);
-    display.invertDisplay(false);
-    display.display();
+    btnFlashEndMs = millis() + BTN_FLASH_DURATION;
+    btnPendingNav = true;
   }
-
-  if (Bottone.Pressed()) {
-    display.invertDisplay(true);
-    display.display();
-    delay(200);
+  if (btnFlashEndMs > 0 && (long)(millis() - btnFlashEndMs) >= 0) {
     display.invertDisplay(false);
     display.display();
-
-    if (!CicloScreen) {
-      showScreenInit(screen.Next());
+    btnFlashEndMs = 0;
+    if (btnPendingNav) {
+      btnPendingNav = false;
+      if (!CicloScreen) {
+        showScreenInit(screen.Next());
+      }
+      CicloScreen = false;
     }
-
-    CicloScreen = false;
   }
 
   if (CicloScreen && showCicloScreenNow) {
@@ -1461,6 +1505,7 @@ void handleSetupGet() {
 void handleSetupPost() {
   String nsid = server.hasArg("ssid") ? server.arg("ssid") : String("");
   nsid.trim();
+  if (nsid.length() > 31) nsid = nsid.substring(0, 31);
   String npwd = server.hasArg("pwd") ? server.arg("pwd") : String("");
   npwd.trim();
   String nmdn = server.hasArg("mdns") ? server.arg("mdns") : String("");
@@ -1545,6 +1590,7 @@ void handleScreenStartPost() {
   f.close();
 
   startScreen = newIndex;
+  CicloScreen = (newIndex == 7);
   screen.Current(startScreen);
   showScreenInit(startScreen);
 
@@ -1592,16 +1638,28 @@ void handleRssPost() {
     return;
   }
 
-  String requested = classRss::normalizeCategory(server.arg("category"));
-  if (!classRss::isValidCategory(requested)) {
+  // Validate the raw input first, then normalize
+  const String rawCat = server.arg("category");
+  if (!classRss::isValidCategory(rawCat)) {
     server.send(400, F("text/plain"), F("Categoria non valida"));
     return;
   }
+  String requested = classRss::normalizeCategory(rawCat);
 
+  // Mount filesystem before any state change — failure leaves in-memory state intact
   if (!LittleFS.begin(false)) {
     server.send(500, F("text/plain"), F("Filesystem non disponibile"));
     return;
   }
+
+  if (!rss.lock(1000 / portTICK_PERIOD_MS)) {
+    server.send(503, F("text/plain"), F("Server busy"));
+    return;
+  }
+  rss.setCategory(requested);
+  rss.unlock();
+
+  // Write file (filesystem already mounted above)
 
   File f = LittleFS.open("/RSS.TXT", "w");
   if (!f) {
@@ -1610,15 +1668,6 @@ void handleRssPost() {
   }
   f.print(requested);
   f.close();
-
-  // Update category safely
-  if (rss.lock(1000 / portTICK_PERIOD_MS)) {
-    rss.setCategory(requested);
-    rss.unlock();
-  } else {
-    server.send(503, F("text/plain"), F("Server busy"));
-    return;
-  }
 
   // Trigger refresh in background task
   forceRssRefresh = true; // Force refresh in next loop of networkTask
@@ -1634,7 +1683,7 @@ void handleRssPost() {
 
 void handleTimezoneGet() {
   String json = F("{\"tz\":\"");
-  json += timezonePosix;
+  json += jsonEscape(timezonePosix);
   json += F("\"}");
   server.send(200, F("application/json"), json);
 }
@@ -1663,7 +1712,7 @@ void handleTimezonePost() {
   applyTimezone();
 
   String json = F("{\"tz\":\"");
-  json += timezonePosix;
+  json += jsonEscape(timezonePosix);
   json += F("\"}");
   server.send(200, F("application/json"), json);
 }
@@ -1680,7 +1729,7 @@ void handleStatus() {
   json += ip.toString();
   json += F("\",");
   json += F("\"mdns\":\"");
-  json += mdns_name;
+  json += jsonEscape(mdns_name);
   json += F("\",");
   json += F("\"rssi\":");
   json += rssi;
@@ -1693,7 +1742,9 @@ void handleStatus() {
   json += F("\",");
   json += F("\"ap_ip\":\"");
   json += apIP.toString();
-  json += F("\"");
+  json += F("\",");
+  json += F("\"cycle\":");
+  json += CicloScreen ? F("true") : F("false");
   json += F("}");
   server.send(200, F("application/json"), json);
 }

@@ -62,32 +62,29 @@ bool classRss::refresh() {
     return false;
   }
 
+  http.setTimeout(5000);
   int code = http.GET();
   if (code != HTTP_CODE_OK) {
     http.end();
     return false;
   }
 
-  // Lock before modifying shared data
-  if (!lock()) {
-    http.end();
-    return false;
-  }
+  // Parse into local buffers — no mutex held during network I/O
+  String localItems[MAX_ITEMS];
+  size_t localCount = 0;
 
-  // Stream parsing
-  _itemCount = 0;
   WiFiClient &stream = http.getStream();
 
-  // Simple state machine for XML parsing to avoid loading full string
-  // We look for <item> ... <title> ... </title> ... </item>
-  // This is a simplified parser for memory efficiency
-
-  String currentTag = "";
   String title = "";
   bool insideItem = false;
   bool insideTitle = false;
+  unsigned long parseStartMs = millis();
+  static const unsigned long PARSE_TIMEOUT_MS = 30000UL;
 
   while (http.connected() && (stream.available() || stream.connected())) {
+    if ((millis() - parseStartMs) > PARSE_TIMEOUT_MS) {
+      break;
+    }
     if (!stream.available()) {
       delay(1);
       continue;
@@ -99,24 +96,49 @@ bool classRss::refresh() {
       title += content;
     }
 
-    if (stream.peek() != '/') {
-      // Opening tag
+    char next = stream.peek();
+
+    if (next == '/') {
+      // Closing tag: </name>
+      stream.read(); // consume '/'
       String tag = stream.readStringUntil('>');
-      // Handle CDATA
-      if (tag.startsWith("![CDATA[")) {
-        if (insideTitle && insideItem) {
-          // Extract CDATA content
-          int cdataEnd = tag.indexOf("]]");
-          if (cdataEnd >= 0) {
-            title += tag.substring(8, cdataEnd);
-          } else {
-            title += tag.substring(8);
-            // If CDATA is split, we might need more logic, but for now assume
-            // it's small enough or we catch the rest
+
+      if (tag.equalsIgnoreCase("title") && insideItem) {
+        insideTitle = false;
+        title = cleanupField(title);
+        if (title.length() > 0) {
+          if (title.length() > 96) {
+            title = title.substring(0, 93) + "...";
+          }
+          if (localCount < MAX_ITEMS) {
+            localItems[localCount++] = title;
           }
         }
+      } else if (tag.equalsIgnoreCase("item")) {
+        insideItem = false;
+        if (localCount >= MAX_ITEMS)
+          break;
+      }
+    } else if (next == '!' || next == '?') {
+      // Comment (<!--), DOCTYPE (<!DOCTYPE), XML PI (<?), or CDATA (<![CDATA[)
+      String tag = stream.readStringUntil('>');
+      // Capture CDATA content when inside a title element
+      if (tag.startsWith("![CDATA[") && insideTitle && insideItem) {
+        int cdataEnd = tag.indexOf("]]");
+        if (cdataEnd >= 0) {
+          title += tag.substring(8, cdataEnd);
+        } else {
+          title += tag.substring(8);
+        }
+      }
+    } else {
+      // Opening tag (possibly self-closing)
+      String tag = stream.readStringUntil('>');
+
+      // Self-closing tags (e.g. <br/>) — ignore
+      if (tag.endsWith("/")) {
+        // nothing to do
       } else {
-        // Normal tag
         // Remove attributes if any
         int space = tag.indexOf(' ');
         if (space > 0)
@@ -130,35 +152,22 @@ bool classRss::refresh() {
           title = "";
         }
       }
-    } else {
-      // Closing tag
-      stream.read(); // consume '/'
-      String tag = stream.readStringUntil('>');
-
-      if (tag.equalsIgnoreCase("title") && insideItem) {
-        insideTitle = false;
-        // Cleanup and store
-        title = cleanupField(title);
-        if (title.length() > 0) {
-          if (title.length() > 96) {
-            title = title.substring(0, 93) + "...";
-          }
-          if (_itemCount < MAX_ITEMS) {
-            _items[_itemCount++] = title;
-          }
-        }
-      } else if (tag.equalsIgnoreCase("item")) {
-        insideItem = false;
-        if (_itemCount >= MAX_ITEMS)
-          break;
-      }
     }
   }
 
   http.end();
+
+  // Lock only to commit parsed results to shared state
+  if (!lock()) {
+    return false;
+  }
+  _itemCount = localCount;
+  for (size_t i = 0; i < localCount; i++) {
+    _items[i] = localItems[i];
+  }
   _lastFetchMillis = millis();
   unlock();
-  return _itemCount > 0;
+  return localCount > 0;
 }
 
 // fetchFeed and parseFeed are merged/replaced by the stream logic in refresh

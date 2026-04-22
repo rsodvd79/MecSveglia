@@ -35,7 +35,7 @@ private:
 
 public:
     bool lock(TickType_t wait = portMAX_DELAY) {
-        if (!_mutex) return true; // Should be initialized
+        if (!_mutex) return false; // mutex not initialized — refuse to proceed unprotected
         return xSemaphoreTake(_mutex, wait) == pdTRUE;
     }
     void unlock() {
