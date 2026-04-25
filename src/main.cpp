@@ -101,6 +101,8 @@ static bool tsep = true;
 // static bool keyp = false;
 
 std::atomic<bool> forceRssRefresh{false};
+std::atomic<bool> forceMeteoRefresh{false};
+std::atomic<bool> needsMdnsRestart{false};
 
 // Network task handle
 TaskHandle_t networkTaskHandle = NULL;
@@ -148,13 +150,21 @@ void networkTask(void *parameter) {
   for (;;) {
     wl_status_t status = WiFi.status();
     if (status == WL_CONNECTED) {
+      // Detect fresh connection (transition from any non-connected state)
+      if (lastStatus != WL_CONNECTED) {
+        WiFi.setAutoReconnect(true);
+        forceRssRefresh = true;
+        forceMeteoRefresh = true;
+        needsMdnsRestart = true;
+      }
       // Update RSS
       if (refreshRssNow || forceRssRefresh) {
         forceRssRefresh = false;
         rss.refresh();
       }
       // Update Meteo
-      if (updateMeteoNow) {
+      if (updateMeteoNow || forceMeteoRefresh) {
+        forceMeteoRefresh = false;
         meteo.Update();
       }
     } else {
@@ -556,6 +566,12 @@ void showScreen1() {
   display.setTextSize(1);
   display.setCursor(dateX, dateY);
   display.print(LCDDate);
+
+  // When time is not yet synced, show a blinking dot in the top-right corner
+  // so it's clear the display is alive but waiting for NTP.
+  if (!validClock && tsep) {
+    display.fillRect(125, 0, 3, 3, SSD1306_WHITE);
+  }
 
   display.display();
 }
@@ -1363,6 +1379,16 @@ void loop(void) {
 
   if (ensureTimeNow) {
     maintainTimeSync();
+  }
+
+  // Restart mDNS after a fresh WiFi connection (e.g., AP→STA recovery)
+  if (needsMdnsRestart.exchange(false)) {
+    if (MDNS.begin(mdns_name)) {
+      MDNS.addService("http", "tcp", 80);
+      mdnsStarted = true;
+    } else {
+      mdnsStarted = false;
+    }
   }
 
   // RSS and Meteo updates are now handled in networkTask
