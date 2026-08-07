@@ -85,6 +85,7 @@ static esp8266::polledTimeout::periodicMs ensureTimeNow(1000 * 15);
 // Named constants for intervals and sizes
 static const uint32_t NETWORK_TASK_STACK    = 16384;
 static const uint32_t AP_STA_RETRY_MS       = 5UL * 60 * 1000;  // 5 min
+static const uint32_t STA_RETRY_TIMEOUT_MS  = 60UL * 1000;      // 1 min
 static const uint32_t WDT_TIMEOUT_SEC       = 30;
 static const uint32_t BTN_FLASH_DURATION    = 200; // ms
 
@@ -140,14 +141,20 @@ void handleScreenStartPost();
 void handleRssGet();
 void handleRssPost();
 
+// Defined below, used by networkTask for AP restoration
+static bool startAccessPoint(IPAddress &apIP);
+
 // Network task function
 void networkTask(void *parameter) {
   esp_task_wdt_add(NULL);
   wl_status_t lastStatus = WL_IDLE_STATUS;
+  static bool staRetryPending = false;
+  static unsigned long staRetryStartMs = 0;
   for (;;) {
     esp_task_wdt_reset();
     wl_status_t status = WiFi.status();
     if (status == WL_CONNECTED) {
+      staRetryPending = false;
       // Detect fresh connection (transition from any non-connected state)
       if (lastStatus != WL_CONNECTED) {
         WiFi.setAutoReconnect(true);
@@ -180,10 +187,20 @@ void networkTask(void *parameter) {
         static unsigned long apStaRetryMs = 0;
         if (millis() - apStaRetryMs >= AP_STA_RETRY_MS) {
           apStaRetryMs = millis();
+          staRetryPending = true;
+          staRetryStartMs = millis();
           WiFi.mode(WIFI_STA);
           WiFi.setAutoReconnect(false);
           WiFi.begin(ssid.c_str(), password.c_str());
         }
+      }
+      // If the STA retry didn't connect in time, restore the AP so the web
+      // UI stays reachable for reconfiguration
+      if (staRetryPending &&
+          (millis() - staRetryStartMs >= STA_RETRY_TIMEOUT_MS)) {
+        staRetryPending = false;
+        IPAddress apIP(0, 0, 0, 0);
+        startAccessPoint(apIP);
       }
     }
     lastStatus = status;
@@ -452,16 +469,22 @@ void showScreen0(bool cmp) {
   display.print(F("Con. to "));
   display.println(ssid);
   display.print(F("IP : "));
-  display.println(WiFi.localIP());
+  if (WiFi.getMode() == WIFI_AP) {
+    display.println(WiFi.softAPIP());
+  } else {
+    display.println(WiFi.localIP());
+  }
   if (cmp) {
     display.print(F("mDNS : "));
     display.println(mdns_name);
-    int rssi = WiFi.RSSI();
-    display.print(F("RSSI : "));
-    display.print(rssi);
-    display.print(F(" dBm "));
-    display.print(dBmtoPercentage(rssi));
-    display.println(F(" %"));
+    if (WiFi.status() == WL_CONNECTED) {
+      int rssi = WiFi.RSSI();
+      display.print(F("RSSI : "));
+      display.print(rssi);
+      display.print(F(" dBm "));
+      display.print(dBmtoPercentage(rssi));
+      display.println(F(" %"));
+    }
   }
   display.display();
 }
@@ -819,6 +842,7 @@ void showScreen6() {
     display.setCursor(0, 0);
     display.print(F("RSS vuoto"));
     display.display();
+    display.setTextWrap(true); // restore default for other screens
     rss.unlock(); // Ensure unlock
     return;
   }
@@ -877,6 +901,7 @@ void showScreen6() {
   }
 
   display.display();
+  display.setTextWrap(true); // restore default for other screens
 
   // Update scrolling
   // Calculate height of the top item to know when to switch
@@ -1129,7 +1154,8 @@ void setup(void) {
       }
 
       display.display();
-      rss.refresh();
+      // No blocking rss.refresh() here: networkTask forces RSS+meteo refresh
+      // as soon as it detects the connection
     } else {
       // Connection failed: fallback to AP mode with SSID = mdns_name
       IPAddress apIP(0, 0, 0, 0);
@@ -1302,11 +1328,14 @@ void setup(void) {
   });
 
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    unsigned int pct =
+        (total > 0) ? (unsigned int)(((unsigned long)progress * 100UL) / total)
+                    : 0;
     display.setTextSize(1);
     display.setCursor(0, 0);
     display.clearDisplay();
     display.print(F("Progress "));
-    display.print((progress / (total / 100)));
+    display.print(pct);
     display.println(F(" %"));
     display.println(progress);
     display.println(total);
@@ -1349,6 +1378,11 @@ void setup(void) {
 
   delay(500);
 
+  // Enable hardware watchdog BEFORE creating tasks: networkTask subscribes
+  // itself in its first instructions, so the WDT must already be initialized
+  esp_task_wdt_init(WDT_TIMEOUT_SEC, true);
+  esp_task_wdt_add(NULL);
+
   // Create Network Task
   xTaskCreate(networkTask,       // Function
               "NetworkTask",     // Name
@@ -1357,10 +1391,6 @@ void setup(void) {
               1,                 // Priority (low)
               &networkTaskHandle // Handle
   );
-
-  // Enable hardware watchdog: reset if main loop hangs for WDT_TIMEOUT_SEC
-  esp_task_wdt_init(WDT_TIMEOUT_SEC, true);
-  esp_task_wdt_add(NULL);
 }
 
 void loop(void) {
@@ -1731,9 +1761,10 @@ void handleTimezonePost() {
 }
 
 void handleStatus() {
-  IPAddress ip = WiFi.localIP();
-  int rssi = WiFi.RSSI();
-  int qual = dBmtoPercentage(rssi);
+  bool connected = (WiFi.status() == WL_CONNECTED);
+  IPAddress ip = connected ? WiFi.localIP() : WiFi.softAPIP();
+  int rssi = connected ? WiFi.RSSI() : 0;
+  int qual = connected ? dBmtoPercentage(rssi) : 0;
   auto mode = WiFi.getMode();
   bool apMode = (mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA);
   IPAddress apIP = WiFi.softAPIP();

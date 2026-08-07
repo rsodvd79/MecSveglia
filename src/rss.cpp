@@ -79,7 +79,9 @@ bool classRss::refresh() {
   bool insideItem = false;
   bool insideTitle = false;
   unsigned long parseStartMs = millis();
-  static const unsigned long PARSE_TIMEOUT_MS = 30000UL;
+  // Must stay well below the task watchdog timeout (30 s): worst case here is
+  // ~PARSE_TIMEOUT_MS + http.setTimeout(5 s), which would otherwise trip it
+  static const unsigned long PARSE_TIMEOUT_MS = 15000UL;
 
   while (http.connected() && (stream.available() || stream.connected())) {
     if ((millis() - parseStartMs) > PARSE_TIMEOUT_MS) {

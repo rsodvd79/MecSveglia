@@ -46,6 +46,7 @@ void classMeteo::Update() {
 
 				if (error) {
 					description = error.c_str();
+					icon = String(F("ERR"));
 
 				}
 				else {

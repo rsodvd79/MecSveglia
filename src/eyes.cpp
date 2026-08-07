@@ -74,8 +74,8 @@ void classEye::blinkStep(bool longPause, unsigned long now) {
     resetEyes(false);
   }
   if (step < 3) {
-    left_eye.height -= 6;
-    right_eye.height -= 6;
+    left_eye.height = max(0, left_eye.height - 6);
+    right_eye.height = max(0, right_eye.height - 6);
     int current_h = left_eye.height;
     int mapped_radius = map(current_h, 4, REF_EYE_HEIGHT, 1, REF_CORNER_RADIUS);
     corner_radius = min(mapped_radius, max(1, current_h / 2));
@@ -87,8 +87,8 @@ void classEye::blinkStep(bool longPause, unsigned long now) {
     return;
   }
   if (step < 6) {
-    left_eye.height += 6;
-    right_eye.height += 6;
+    left_eye.height = min(REF_EYE_HEIGHT, left_eye.height + 6);
+    right_eye.height = min(REF_EYE_HEIGHT, right_eye.height + 6);
     int current_h = left_eye.height;
     int mapped_radius = map(current_h, 4, REF_EYE_HEIGHT, 1, REF_CORNER_RADIUS);
     corner_radius = min(mapped_radius, max(1, current_h / 2));
