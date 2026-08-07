@@ -1,97 +1,127 @@
-# Guida Agente MecSveglia
+# MecSveglia
 
-## Panoramica del Progetto
-Orologio/compagno da scrivania basato su ESP32-S3 con display OLED, WiFi, ora NTP, meteo, notizie RSS e interfaccia web.
+ESP32-S3 smart clock/desk companion (Waveshare Zero). PlatformIO + Arduino.
 
-## Directory Principali
-- `src/` - Codice sorgente principale
-- `data/` - File caricati su LittleFS (pagine web, file di configurazione)
-- `info/` - Definizioni della scheda e pinout
-- `stl/` - Modelli stampabili in 3D
-- `test/` - File di test
+## Commands
 
-## Comandi Essenziali
+| Azione | Comando |
+|---|---|
+| Compila | `pio run` |
+| Flash firmware | `pio run --target upload` |
+| Flash filesystem | `pio run --target uploadfs` |
+| Monitor seriale | `pio device monitor` (115200 baud) |
 
-### PlatformIO
-- Compila: `pio run`
-- Carica firmware: `pio run --target upload`
-- Carica filesystem: `pio run --target uploadfs`
-- Pulisci: `pio run --target clean`
-- Monitor: `pio device monitor`
+**Nessun test presente** nel repository.
 
-### Note sul Filesystem
-- **LittleFS utilizzato** (configurato come `spiffs` in platformio.ini ma mappato a LittleFS tramite `#define LittleFS SPIFFS` in main.cpp)
-- File critici in `data/`:
-  - `INDEX.HTM` - Pagina principale
-  - `SETUP.HTM` - Configurazione WiFi
-  - `WIFI_SID.TXT` / `WIFI_PWD.TXT` - Credenziali WiFi
-  - `MDNS_NM.TXT` - Nome mDNS (predefinito: MECSVEGLIA)
-  - `SCREEN.TXT` - Schermo di avvio (0-7)
-  - `METEO_API.TXT` - Stringa di query OpenWeatherMap
-  - `RSS.TXT` - Categoria RSS
-  - `TIME_ZONE.TXT` - Stringa del fuso orario
+## LittleFS
 
-## Flusso di Lavoro di Sviluppo
-1. Modifica il sorgente in `src/`
-2. Modifica/crea file in `data/` secondo necessità
-3. Compila e carica il firmware: `pio run --target upload`
-4. Carica l'immagine del filesystem: `pio run --target uploadfs` (necessario quando cambiano i dati)
-5. Monitora l'output: `pio device monitor`
+`platformio.ini` dichiara `board_build.filesystem = spiffs` ma il codice mappa:
+```cpp
+#define LittleFS SPIFFS
+```
+Usa sempre `LittleFS` nel codice, mai `SPIFFS` direttamente.
 
-## Dettagli Importanti di Implementazione
+## Architettura
 
-### Task di Rete
-- Task FreeRTOS gestisce gli aggiornamenti RSS/meteo per evitare il blocco del display
-- Situato in `main.cpp`: funzione `networkTask()`
-- Aggiorna RSS ogni ora, meteo ogni 30 minuti
+`src/main.cpp` (~1820 righe) contiene: loop principale, HTTP server, WiFi, OTA, timers, tutti gli 8 screen. Un task FreeRTOS (`networkTask`) gestisce RSS/meteo/scansione WiFi — priority 1, stack 8KB, tick 1s.
 
-### Schermi di Visualizzazione (0-7)
-0: Stato WiFi
-1: Ora/data
-2: Animazioni occhi
-3: Meteo
-4: Game of Life
-5: Triangolo animato
-6: Notizie RSS
-7: Display automatico ciclico
+Moduli sorgente:
 
-### Pulsante (GPIO12)
-- Avanzamento schermo manuale (pressione breve)
-- Pressione lunga attiva l'inversione del display (protezione contro il burn-in)
+| File | Ruolo |
+|---|---|
+| `main.cpp` | Display, HTTP, WiFi, OTA, timers, tutti gli screen |
+| `eyes.cpp` | Macchina a stati animazione occhi (wakeup→blink/saccade→sleep) |
+| `rss.cpp` | Fetch/parse feed RSS con cache protetta da mutex |
+| `meteo.cpp` | Fetch OpenWeatherMap con mutex |
+| `GOL.cpp` | Game of Life 64×32, rilevamento stasi + iniezione blinker |
+| `screen.cpp` | Indice schermo corrente, 4 righe di testo per boot log |
+| `Button.cpp` | Debounce (250ms) su GPIO12, INPUT_PULLUP, attivo LOW |
 
-### Endpoint HTTP
-- `/` - Pagina principale
-- `/setup` - Configurazione WiFi
-- `/status` - Stato JSON
-- `/time` - Forza schermo ora
-- `/eyes` - Forza schermo occhi
-- `/meteo` - Forza schermo meteo
-- `/gol` - Forza Game of Life
-- `/tri` - Forza triangolo
-- `/cycle` - Attiva/disattiva auto-ciclo
-- `/rss` - Controllo feed RSS
-- `/oled` - Buffer display grezzo
-- `/wifi` - Forza schermo WiFi
-- `/timezone` - Configurazione fuso orario
+## Schermi (0-7)
 
-### Aggiornamenti OTA
-- Abilitati tramite ArduinoOTA
-- Hostname corrisponde al nome mDNS
-- Richiede connessione di rete
+0: WiFi · 1: Ora/data · 2: Occhi · 3: Meteo · 4: Game of Life · 5: Triangolo · 6: RSS · 7: Ciclo automatico
 
-## Configurazione di Compilazione
-- Scheda: `esp32-s3-fh4r2` (4MB flash + 2MB PSRAM)
-- Framework: Arduino
-- USB CDC abilitato all'avvio
-- Librerie gestite tramite platformio.ini:
-  - Adafruit SSD1306
-  - Adafruit GFX
-  - Adafruit NeoPixel
-  - ArduinoJson
+Screen 7 mostra testo "CICLO" rimbalzante quando non in ciclo; se `CicloScreen=true` avanza tra 1-6 ogni ~60s.
 
-## Verifica
-- Compilazione riuscita mostra nessun errore
-- Il dispositivo si connette al WiFi quando presenti le credenziali
-- Torna alla modalità AP quando mancano le credenziali
-- Risponditore mDNS attivo come `<mdns_name>.local`
-- Il display mostra gli schermi appropriati in base allo stato
+## Pattern temporali
+
+Tutti i timer usano `esp8266::polledTimeout::periodicMs` (implementato in main.cpp):
+```cpp
+static esp8266::polledTimeout::periodicMs showTimeNow(250);
+if (showTimeNow) { /* ogni 250ms */ }
+```
+Per logica temporale fuori dal helper, usa sempre sottrazione: `if ((long)(millis() - t0) >= 0)`.
+
+## Mutex per dati condivisi
+
+`classMeteo` e `classRss` hanno `_mutex` interno. Chiama `lock()`/`unlock()` prima di leggere/scrivere campi pubblici da contesti diversi (main loop vs networkTask).
+
+**RSS**: fetch HTTP e parsing XML senza mutex; lock solo per la copia breve in `_items[]`.
+
+**Meteo**: lock solo nell'assegnazione finale dei campi (`temp`, `humidity`, `wind_speed`, `description`, `icon`, `snow`). Sono tutti `public`.
+
+## WiFi
+
+- STA se `WIFI_SID.TXT` + `WIFI_PWD.TXT` su LittleFS, altrimenti AP con SSID = mDNS name
+- `networkTask` gestisce auto-reconnect (15s) e ritorno AP→STA (5min). Non aggiungere logica in `loop()`.
+- Fallback AP: WiFi.persistent(false), TX power limitato a 11dBm
+- mDNS avviato anche in AP mode
+
+## HTTP
+
+Route principali: `/`, `/setup`, `/status`, `/config`, `/wifi`, `/time`, `/eyes`, `/meteo`, `/tri`, `/gol`, `/golreset`, `/cycle`, `/rssscreen`, `/rss`, `/oled`, `/timezone`, `/screen/start`, `/favicon.ico`
+
+`handleRoot()` serve `INDEX.HTM` rimpiazzando `__MDNS__` col nome mDNS a runtime. `M404.HTM` opzionale su LittleFS per 404 custom.
+
+## Config su filesystem
+
+Tutti i file `.TXT` in `data/` letti in `setup()`. Scrittura immediata su HTTP POST.
+
+| File | Contenuto |
+|---|---|
+| `WIFI_SID.TXT` | SSID WiFi |
+| `WIFI_PWD.TXT` | Password WiFi (in `.gitignore`) |
+| `MDNS_NM.TXT` | Nome mDNS (default MECSVEGLIA) |
+| `TIME_ZONE.TXT` | POSIX TZ string (default `CET-1CEST,M3.5.0/2,M10.5.0/3`) |
+| `SCREEN.TXT` | Schermo iniziale 0-7 |
+| `METEO_API.TXT` | Query string OpenWeatherMap dopo `?` |
+| `RSS.TXT` | Categoria RSS ANSA |
+
+## ArduinoJson
+
+**Usa v6** (`StaticJsonDocument`/`DynamicJsonDocument`). La libreria in `platformio.ini` è `^6.21.2`.
+
+## OTA
+
+Hostname = mDNS name. Display mostra progress %. WDT 30s abilitato.
+
+## Display
+
+- SSD1306 128×32, I2C addr 0x3C
+- `display.dim(true)` in notturna (22:00-06:59)
+- Ogni screen: clear → draw → `display.display()` **una volta**
+- Inversione anti burn-in ogni 30 min (disabilitata nel codice ma timer presente)
+
+## Board custom
+
+Definizione in `board/esp32-s3-fh4r2.json` (Waveshare ESP32-S3 Zero, 4MB flash + 2MB PSRAM). Build flags: `ARDUINO_USB_MODE=1`, `ARDUINO_USB_CDC_ON_BOOT=1`.
+
+## Partitioni (`partitions.csv`)
+
+`app0` (0x10000, ~2MB) + `spiffs` (0x200000, 2MB). Supporta OTA (due slot app).
+
+## Risorse informative esistenti
+
+- `.github/copilot-instructions.md` — documentazione complementare dettagliata
+- `info/esp32-S3-Zero-Waveshare-pinout-low.jpg` — pinout
+- `README.md` — panoramica estesa
+
+## Da sapere
+
+- `screen` va in ricorsione: `Next()` incrementa e resetta a 0 se > max
+- `GOL.Update()` rileva stasi (hash FNV-1a) e inietta blinker automaticamente
+- `networkTask` forza refresh RSS e meteo alla prima connessione WiFi (flag atomici `forceRssRefresh`, `forceMeteoRefresh`)
+- `needsMdnsRestart` atomico per riavviare mDNS dopo riconnessione AP→STA
+- Il pulsante breve fa lampeggiare il display (200ms invert) poi cambia screen
+- `showScreenInit(screen.Current(s))` è il modo corretto per cambiare screen da HTTP handler
+- LED_BUILTIN usato come indicatore attività (LOW = busy, HIGH = idle)

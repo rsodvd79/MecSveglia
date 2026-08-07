@@ -170,10 +170,6 @@ bool classRss::refresh() {
   return localCount > 0;
 }
 
-// fetchFeed and parseFeed are merged/replaced by the stream logic in refresh
-bool classRss::fetchFeed(String &out) { return false; }
-void classRss::parseFeed(const String &payload) {}
-
 String classRss::buildUrl(const String &category) {
   for (size_t i = 0; i < kCategoryFeedOverridesCount; ++i) {
     if (category.equalsIgnoreCase(kCategoryFeedOverrides[i].name)) {

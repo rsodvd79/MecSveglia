@@ -1,5 +1,6 @@
 #include "meteo.h"
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
 
 classMeteo::classMeteo() {
@@ -13,10 +14,11 @@ classMeteo::classMeteo() {
 }
 
 void classMeteo::Update() {
-	WiFiClient client;
+	WiFiClientSecure client;
+	client.setInsecure();
 	HTTPClient http;
 
-	String URL = F("http://api.openweathermap.org/data/2.5/weather?");
+	String URL = F("https://api.openweathermap.org/data/2.5/weather?");
 
 	if (URL.concat(Api) && http.begin(client, URL)) {
 		http.setTimeout(5000);

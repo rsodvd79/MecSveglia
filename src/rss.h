@@ -22,8 +22,6 @@ public:
     bool hasData() const { return _itemCount > 0; }
 
 private:
-    bool fetchFeed(String& out);
-    void parseFeed(const String& payload);
     static String buildUrl(const String& category);
     static String cleanupField(const String& input);
 

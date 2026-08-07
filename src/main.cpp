@@ -41,7 +41,6 @@ static const char *const DEFAULT_TZ = "CET-1CEST,M3.5.0/2,M10.5.0/3";
 String timezonePosix = DEFAULT_TZ;
 static bool timezoneConfigured = false;
 
-static timeval tv;
 static time_t xnow;
 
 // Portable periodic timer with ESP8266-like API on ESP32
@@ -81,14 +80,12 @@ static esp8266::polledTimeout::periodicMs showRssScrollNow(120);
 static esp8266::polledTimeout::periodicMs refreshRssNow(1000 * 60 * 60);
 static esp8266::polledTimeout::periodicMs wifiReconnectNow(1000 * 15);
 static esp8266::polledTimeout::periodicMs adjustBrightnessNow(1000 * 60);
-static esp8266::polledTimeout::periodicMs invertPulseNow(1000 * 60 * 30);
 static esp8266::polledTimeout::periodicMs ensureTimeNow(1000 * 15);
 
 // Named constants for intervals and sizes
-static const uint32_t NETWORK_TASK_STACK    = 8192;
+static const uint32_t NETWORK_TASK_STACK    = 16384;
 static const uint32_t AP_STA_RETRY_MS       = 5UL * 60 * 1000;  // 5 min
 static const uint32_t WDT_TIMEOUT_SEC       = 30;
-static const uint32_t INVERT_FLASH_DURATION = 250; // ms
 static const uint32_t BTN_FLASH_DURATION    = 200; // ms
 
 static time_t lastSuccessfulSync = 0;
@@ -114,7 +111,6 @@ classMeteo meteo = classMeteo();
 classScreen screen = classScreen(7);
 bool CicloScreen = false;
 classGOL GOL = classGOL();
-bool mdnsStarted = false;
 classRss rss;
 
 static const unsigned int SCREEN_MAX_INDEX = 7;
@@ -146,8 +142,10 @@ void handleRssPost();
 
 // Network task function
 void networkTask(void *parameter) {
+  esp_task_wdt_add(NULL);
   wl_status_t lastStatus = WL_IDLE_STATUS;
   for (;;) {
+    esp_task_wdt_reset();
     wl_status_t status = WiFi.status();
     if (status == WL_CONNECTED) {
       // Detect fresh connection (transition from any non-connected state)
@@ -298,7 +296,6 @@ static bool startAccessPoint(IPAddress &apIP) {
 
   if (!WiFi.softAP(mdns_name.c_str())) {
     apIP = IPAddress(0, 0, 0, 0);
-    mdnsStarted = false;
     return false;
   }
 
@@ -308,9 +305,6 @@ static bool startAccessPoint(IPAddress &apIP) {
   // Optionally start mDNS also in AP mode so MDNS.update() is safe
   if (MDNS.begin(mdns_name)) {
     MDNS.addService("http", "tcp", 80);
-    mdnsStarted = true;
-  } else {
-    mdnsStarted = false;
   }
 
   return true;
@@ -759,7 +753,7 @@ void showScreen5() {
   display.display();
 }
 
-void showScreen6() {
+void showScreen7() {
   // Bouncing "CICLO" text
   static bool init = false;
   static int x = 0, y = 0;
@@ -805,7 +799,7 @@ void showScreen6() {
   display.println(txt);
   display.display();
 }
-void showScreen7() {
+void showScreen6() {
   if (!rss.lock(100 / portTICK_PERIOD_MS))
     return; // Try to lock
 
@@ -914,8 +908,8 @@ void renderScreenNow(unsigned int s) {
   case 3: showScreen3();     break;
   case 4: showScreen4();     break;
   case 5: showScreen5();     break;
-  case 6: showScreen7();     break;
-  case 7: showScreen6();     break;
+  case 6: showScreen6();     break;
+  case 7: showScreen7();     break;
   }
 }
 
@@ -1130,10 +1124,8 @@ void setup(void) {
       if (MDNS.begin(mdns_name)) {
         display.println(F("mDNS responder start"));
         MDNS.addService("http", "tcp", 80);
-        mdnsStarted = true;
       } else {
         display.println(F("mDNS responder stop"));
-        mdnsStarted = false;
       }
 
       display.display();
@@ -1385,9 +1377,6 @@ void loop(void) {
   if (needsMdnsRestart.exchange(false)) {
     if (MDNS.begin(mdns_name)) {
       MDNS.addService("http", "tcp", 80);
-      mdnsStarted = true;
-    } else {
-      mdnsStarted = false;
     }
   }
 
@@ -1476,13 +1465,13 @@ void loop(void) {
     break;
   case 6:
     if (showRssScrollNow) {
-      showScreen7();
+      showScreen6();
     }
     break;
   case 7:
     // Animate the bouncing text frequently
     if (showTriNow) {
-      showScreen6();
+      showScreen7();
     }
     // When not yet in auto-cycle, after a minute auto-enable it
     if (!CicloScreen && showCicloScreenNow) {
@@ -1664,13 +1653,12 @@ void handleRssPost() {
     return;
   }
 
-  // Validate the raw input first, then normalize
   const String rawCat = server.arg("category");
-  if (!classRss::isValidCategory(rawCat)) {
+  String requested = classRss::normalizeCategory(rawCat);
+  if (requested == classRss::kDefaultCategory && !rawCat.equalsIgnoreCase(classRss::kDefaultCategory)) {
     server.send(400, F("text/plain"), F("Categoria non valida"));
     return;
   }
-  String requested = classRss::normalizeCategory(rawCat);
 
   // Mount filesystem before any state change — failure leaves in-memory state intact
   if (!LittleFS.begin(false)) {
@@ -1678,15 +1666,7 @@ void handleRssPost() {
     return;
   }
 
-  if (!rss.lock(1000 / portTICK_PERIOD_MS)) {
-    server.send(503, F("text/plain"), F("Server busy"));
-    return;
-  }
-  rss.setCategory(requested);
-  rss.unlock();
-
-  // Write file (filesystem already mounted above)
-
+  // Write file FIRST — fail before changing in-memory state
   File f = LittleFS.open("/RSS.TXT", "w");
   if (!f) {
     server.send(500, F("text/plain"), F("Errore scrittura RSS"));
@@ -1694,6 +1674,13 @@ void handleRssPost() {
   }
   f.print(requested);
   f.close();
+
+  if (!rss.lock(1000 / portTICK_PERIOD_MS)) {
+    server.send(503, F("text/plain"), F("Server busy"));
+    return;
+  }
+  rss.setCategory(requested);
+  rss.unlock();
 
   // Trigger refresh in background task
   forceRssRefresh = true; // Force refresh in next loop of networkTask
@@ -1801,11 +1788,6 @@ void handleOled() {
 }
 
 void handleFavicon() {
-  // Serve /favicon.ico from LittleFS with proper content type and caching
-  if (!LittleFS.begin(false)) {
-    server.send(404, F("text/plain"), F(""));
-    return;
-  }
   if (LittleFS.exists("/favicon.ico")) {
     File f = LittleFS.open("/favicon.ico", "r");
     if (f) {
