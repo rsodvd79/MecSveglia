@@ -16,11 +16,13 @@ classMeteo::classMeteo() {
 void classMeteo::Update() {
 	WiFiClientSecure client;
 	client.setInsecure();
+	client.setHandshakeTimeout(5);
 	HTTPClient http;
 
 	String URL = F("https://api.openweathermap.org/data/2.5/weather?");
 
 	if (URL.concat(Api) && http.begin(client, URL)) {
+		http.setConnectTimeout(5000);
 		http.setTimeout(5000);
 		int httpCode = http.GET();
 

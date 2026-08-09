@@ -3,6 +3,7 @@
 #include <HTTPClient.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <esp_task_wdt.h>
 
 const char *const classRss::kDefaultCategory = "tecnologia";
 const char *const classRss::kCategories[] = {
@@ -47,6 +48,7 @@ bool classRss::refresh() {
   // Use a local client to stream
   WiFiClientSecure client;
   client.setInsecure();
+  client.setHandshakeTimeout(5);
   HTTPClient http;
 
   String url;
@@ -62,12 +64,14 @@ bool classRss::refresh() {
     return false;
   }
 
+  http.setConnectTimeout(5000);
   http.setTimeout(5000);
   int code = http.GET();
   if (code != HTTP_CODE_OK) {
     http.end();
     return false;
   }
+  esp_task_wdt_reset();
 
   // Parse into local buffers — no mutex held during network I/O
   String localItems[MAX_ITEMS];
@@ -79,11 +83,16 @@ bool classRss::refresh() {
   bool insideItem = false;
   bool insideTitle = false;
   unsigned long parseStartMs = millis();
+  unsigned long lastWatchdogResetMs = parseStartMs;
   // Must stay well below the task watchdog timeout (30 s): worst case here is
   // ~PARSE_TIMEOUT_MS + http.setTimeout(5 s), which would otherwise trip it
   static const unsigned long PARSE_TIMEOUT_MS = 15000UL;
 
   while (http.connected() && (stream.available() || stream.connected())) {
+    if (millis() - lastWatchdogResetMs >= 1000UL) {
+      esp_task_wdt_reset();
+      lastWatchdogResetMs = millis();
+    }
     if ((millis() - parseStartMs) > PARSE_TIMEOUT_MS) {
       break;
     }

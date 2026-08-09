@@ -8,6 +8,7 @@
 #include <WiFiClient.h>
 #include <Wire.h>
 #include <atomic>
+#include <esp_system.h>
 #include <esp_sntp.h>
 #include <esp_task_wdt.h>
 #include <sys/time.h> // struct timeval
@@ -72,11 +73,11 @@ static esp8266::polledTimeout::periodicMs showSTimeNow(500);
 static esp8266::polledTimeout::periodicMs showWifiNow(500);
 static esp8266::polledTimeout::periodicMs showEyesNow(125);
 static esp8266::polledTimeout::periodicMs showMeteoNow(1000 * 30);
-static esp8266::polledTimeout::periodicMs updateMeteoNow(1000 * 30);
+static esp8266::polledTimeout::periodicMs updateMeteoNow(30UL * 60 * 1000);
 static esp8266::polledTimeout::periodicMs showCicloScreenNow(1000 * 60);
 static esp8266::polledTimeout::periodicMs showGOLNow(80);
 static esp8266::polledTimeout::periodicMs showTriNow(60);
-static esp8266::polledTimeout::periodicMs showRssScrollNow(120);
+static esp8266::polledTimeout::periodicMs showRssScrollNow(240);
 static esp8266::polledTimeout::periodicMs refreshRssNow(1000 * 60 * 60);
 static esp8266::polledTimeout::periodicMs wifiReconnectNow(1000 * 15);
 static esp8266::polledTimeout::periodicMs adjustBrightnessNow(1000 * 60);
@@ -101,6 +102,9 @@ static bool tsep = true;
 std::atomic<bool> forceRssRefresh{false};
 std::atomic<bool> forceMeteoRefresh{false};
 std::atomic<bool> needsMdnsRestart{false};
+std::atomic<bool> otaInProgress{false};
+
+static esp_reset_reason_t bootResetReason = ESP_RST_UNKNOWN;
 
 // Network task handle
 TaskHandle_t networkTaskHandle = NULL;
@@ -127,6 +131,7 @@ static const size_t SCREEN_OPTION_COUNT =
     sizeof(SCREEN_OPTIONS) / sizeof(SCREEN_OPTIONS[0]);
 static uint8_t startScreen = 0;
 static const wifi_power_t AP_TX_POWER = WIFI_POWER_11dBm;
+static const wifi_power_t STA_TX_POWER = WIFI_POWER_15dBm;
 
 // HTTP handlers prototypes
 void handleSetupGet();
@@ -143,15 +148,40 @@ void handleRssPost();
 
 // Defined below, used by networkTask for AP restoration
 static bool startAccessPoint(IPAddress &apIP);
+static bool restartMdns();
+
+static const char *resetReasonName(esp_reset_reason_t reason) {
+  switch (reason) {
+  case ESP_RST_POWERON:  return "POWER_ON";
+  case ESP_RST_EXT:      return "EXTERNAL";
+  case ESP_RST_SW:       return "SOFTWARE";
+  case ESP_RST_PANIC:    return "PANIC";
+  case ESP_RST_INT_WDT:  return "INT_WDT";
+  case ESP_RST_TASK_WDT: return "TASK_WDT";
+  case ESP_RST_WDT:      return "WATCHDOG";
+  case ESP_RST_DEEPSLEEP:return "DEEP_SLEEP";
+  case ESP_RST_BROWNOUT: return "BROWNOUT";
+  case ESP_RST_SDIO:     return "SDIO";
+  default:               return "UNKNOWN";
+  }
+}
 
 // Network task function
 void networkTask(void *parameter) {
-  esp_task_wdt_add(NULL);
+  const esp_err_t wdtAddResult = esp_task_wdt_add(NULL);
+  if (wdtAddResult != ESP_OK) {
+    Serial.printf("[WDT] NetworkTask subscribe failed: %d\n", wdtAddResult);
+  }
   wl_status_t lastStatus = WL_IDLE_STATUS;
   static bool staRetryPending = false;
   static unsigned long staRetryStartMs = 0;
   for (;;) {
     esp_task_wdt_reset();
+    if (otaInProgress.load()) {
+      vTaskDelay(1000 / portTICK_PERIOD_MS);
+      continue;
+    }
+
     wl_status_t status = WiFi.status();
     if (status == WL_CONNECTED) {
       staRetryPending = false;
@@ -163,14 +193,17 @@ void networkTask(void *parameter) {
         needsMdnsRestart = true;
       }
       // Update RSS
-      if (refreshRssNow || forceRssRefresh) {
-        forceRssRefresh = false;
+      const bool rssForced = forceRssRefresh.exchange(false);
+      if (refreshRssNow || rssForced) {
         rss.refresh();
-      }
-      // Update Meteo
-      if (updateMeteoNow || forceMeteoRefresh) {
-        forceMeteoRefresh = false;
-        meteo.Update();
+        esp_task_wdt_reset();
+      } else {
+        // Avoid two consecutive TLS handshakes and their combined power peak.
+        const bool meteoForced = forceMeteoRefresh.exchange(false);
+        if (updateMeteoNow || meteoForced) {
+          meteo.Update();
+          esp_task_wdt_reset();
+        }
       }
     } else {
       // If we're meant to be in STA mode, try to recover the link periodically
@@ -190,6 +223,7 @@ void networkTask(void *parameter) {
           staRetryPending = true;
           staRetryStartMs = millis();
           WiFi.mode(WIFI_STA);
+          WiFi.setTxPower(STA_TX_POWER);
           WiFi.setAutoReconnect(false);
           WiFi.begin(ssid.c_str(), password.c_str());
         }
@@ -200,7 +234,9 @@ void networkTask(void *parameter) {
           (millis() - staRetryStartMs >= STA_RETRY_TIMEOUT_MS)) {
         staRetryPending = false;
         IPAddress apIP(0, 0, 0, 0);
-        startAccessPoint(apIP);
+        if (startAccessPoint(apIP)) {
+          needsMdnsRestart = true;
+        }
       }
     }
     lastStatus = status;
@@ -302,9 +338,8 @@ static bool parseScreenIndex(const String &src, unsigned int &out) {
 
 static bool startAccessPoint(IPAddress &apIP) {
   // Bring down STA cleanly before starting AP to avoid Wi-Fi stack panics
-  WiFi.persistent(true);
-  WiFi.disconnect(true, true);
   WiFi.persistent(false);
+  WiFi.disconnect(true, false);
   WiFi.mode(WIFI_AP);
 
   // Lower TX power to reduce brownout risk on USB-powered boards
@@ -319,12 +354,16 @@ static bool startAccessPoint(IPAddress &apIP) {
   delay(50);
   apIP = WiFi.softAPIP();
 
-  // Optionally start mDNS also in AP mode so MDNS.update() is safe
+  return true;
+}
+
+static bool restartMdns() {
+  MDNS.end();
   if (MDNS.begin(mdns_name)) {
     MDNS.addService("http", "tcp", 80);
+    return true;
   }
-
-  return true;
+  return false;
 }
 
 static bool timeIsSane(time_t candidate) {
@@ -913,7 +952,7 @@ void showScreen6() {
 
   // Scroll speed: 1 pixel per call (approx)
   // Adjust this value to change speed.
-  // showRssScrollNow period is 120ms. 1px/120ms = ~8px/sec.
+  // showRssScrollNow period is 240ms. 1px/240ms = ~4px/sec.
   float step = 1.0f;
 
   scrollOffset -= step;
@@ -960,6 +999,11 @@ void AddScreenRows(String r) {
 
 void setup(void) {
 
+  Serial.begin(115200);
+  bootResetReason = esp_reset_reason();
+  Serial.printf("\n[BOOT] Reset reason: %s (%d)\n",
+                resetReasonName(bootResetReason), bootResetReason);
+
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, HIGH);
 
@@ -976,6 +1020,7 @@ void setup(void) {
   display.display();
 
   screen.RowClear();
+  AddScreenRows(String(F("RESET: ")) + resetReasonName(bootResetReason));
   bool wifiConfigured = true;
   rss.begin();
   String rssCategory = classRss::kDefaultCategory;
@@ -1114,6 +1159,7 @@ void setup(void) {
   // decide network mode
   if (wifiConfigured && ssid.length() > 0 && password.length() > 0) {
     WiFi.mode(WIFI_STA);
+    WiFi.setTxPower(STA_TX_POWER);
     // Avoid auto-reconnect loops while we manage fallback
     WiFi.setAutoConnect(false);
     WiFi.setAutoReconnect(false);
@@ -1146,9 +1192,8 @@ void setup(void) {
       WiFi.setAutoReconnect(true);
       showScreen0(false);
 
-      if (MDNS.begin(mdns_name)) {
+      if (restartMdns()) {
         display.println(F("mDNS responder start"));
-        MDNS.addService("http", "tcp", 80);
       } else {
         display.println(F("mDNS responder stop"));
       }
@@ -1160,6 +1205,9 @@ void setup(void) {
       // Connection failed: fallback to AP mode with SSID = mdns_name
       IPAddress apIP(0, 0, 0, 0);
       bool apStarted = startAccessPoint(apIP);
+      if (apStarted) {
+        restartMdns();
+      }
 
       display.clearDisplay();
       display.setCursor(0, 0);
@@ -1180,6 +1228,9 @@ void setup(void) {
     // Fallback AP mode with SSID = mdns_name, open network
     IPAddress apIP(0, 0, 0, 0);
     bool apStarted = startAccessPoint(apIP);
+    if (apStarted) {
+      restartMdns();
+    }
 
     display.clearDisplay();
     display.setCursor(0, 0);
@@ -1299,6 +1350,7 @@ void setup(void) {
   display.display();
 
   ArduinoOTA.onStart([]() {
+    otaInProgress = true;
     digitalWrite(LED_BUILTIN, LOW);
     display.setTextSize(1);
     display.clearDisplay();
@@ -1318,6 +1370,7 @@ void setup(void) {
   });
 
   ArduinoOTA.onEnd([]() {
+    otaInProgress = false;
     digitalWrite(LED_BUILTIN, HIGH);
     display.setTextSize(1);
     display.clearDisplay();
@@ -1343,6 +1396,7 @@ void setup(void) {
   });
 
   ArduinoOTA.onError([](ota_error_t error) {
+    otaInProgress = false;
     digitalWrite(LED_BUILTIN, HIGH);
     display.setTextSize(1);
     display.clearDisplay();
@@ -1380,17 +1434,27 @@ void setup(void) {
 
   // Enable hardware watchdog BEFORE creating tasks: networkTask subscribes
   // itself in its first instructions, so the WDT must already be initialized
-  esp_task_wdt_init(WDT_TIMEOUT_SEC, true);
-  esp_task_wdt_add(NULL);
+  const esp_err_t wdtInitResult = esp_task_wdt_init(WDT_TIMEOUT_SEC, true);
+  if (wdtInitResult != ESP_OK) {
+    Serial.printf("[WDT] Init failed: %d\n", wdtInitResult);
+  }
+  const esp_err_t wdtAddResult = esp_task_wdt_add(NULL);
+  if (wdtAddResult != ESP_OK) {
+    Serial.printf("[WDT] Loop task subscribe failed: %d\n", wdtAddResult);
+  }
 
   // Create Network Task
-  xTaskCreate(networkTask,       // Function
-              "NetworkTask",     // Name
-              NETWORK_TASK_STACK, // Stack size
-              NULL,              // Parameters
-              1,                 // Priority (low)
-              &networkTaskHandle // Handle
-  );
+  const BaseType_t taskResult =
+      xTaskCreate(networkTask,          // Function
+                  "NetworkTask",        // Name
+                  NETWORK_TASK_STACK,   // Stack size
+                  NULL,                 // Parameters
+                  1,                    // Priority (low)
+                  &networkTaskHandle);  // Handle
+  if (taskResult != pdPASS) {
+    networkTaskHandle = NULL;
+    Serial.println(F("[RTOS] NetworkTask creation failed"));
+  }
 }
 
 void loop(void) {
@@ -1405,9 +1469,7 @@ void loop(void) {
 
   // Restart mDNS after a fresh WiFi connection (e.g., AP→STA recovery)
   if (needsMdnsRestart.exchange(false)) {
-    if (MDNS.begin(mdns_name)) {
-      MDNS.addService("http", "tcp", 80);
-    }
+    restartMdns();
   }
 
   // RSS and Meteo updates are now handled in networkTask
@@ -1789,6 +1851,16 @@ void handleStatus() {
   json += F("\",");
   json += F("\"cycle\":");
   json += CicloScreen ? F("true") : F("false");
+  json += F(",\"reset_reason\":\"");
+  json += resetReasonName(bootResetReason);
+  json += F("\",\"free_heap\":");
+  json += ESP.getFreeHeap();
+  json += F(",\"min_free_heap\":");
+  json += ESP.getMinFreeHeap();
+  json += F(",\"loop_stack_min\":");
+  json += uxTaskGetStackHighWaterMark(NULL);
+  json += F(",\"network_stack_min\":");
+  json += networkTaskHandle ? uxTaskGetStackHighWaterMark(networkTaskHandle) : 0;
   json += F("}");
   server.send(200, F("application/json"), json);
 }
