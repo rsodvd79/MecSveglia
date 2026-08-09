@@ -1861,6 +1861,10 @@ void handleStatus() {
   json += uxTaskGetStackHighWaterMark(NULL);
   json += F(",\"network_stack_min\":");
   json += networkTaskHandle ? uxTaskGetStackHighWaterMark(networkTaskHandle) : 0;
+  json += F(",\"uptime_ms\":");
+  json += millis();
+  json += F(",\"screen\":");
+  json += screen.Current();
   json += F("}");
   server.send(200, F("application/json"), json);
 }

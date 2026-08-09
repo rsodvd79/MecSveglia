@@ -170,6 +170,29 @@
       margin-top: 16px;
     }
 
+    .info-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    @media (min-width: 600px) {
+      .info-grid {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
+    }
+
+    .muted {
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 2px;
+    }
+
+    .info-grid code {
+      overflow-wrap: anywhere;
+    }
+
     .status {
       margin-top: 12px;
       font-size: 14px;
@@ -226,7 +249,7 @@
 
     <div class="card" id="info-card">
       <strong>Stato dispositivo</strong>
-      <div class="grid" style="grid-template-columns: repeat(4, minmax(0,1fr)); margin-top:8px;">
+      <div class="info-grid">
         <div>
           <div class="muted">IP</div>
           <code id="ip">—</code>
@@ -240,8 +263,40 @@
           <code id="rssi">—</code>
         </div>
         <div>
-          <div class="muted">Mode</div>
+          <div class="muted">Modalità</div>
           <code id="mode">—</code>
+        </div>
+        <div>
+          <div class="muted">Ultimo reset</div>
+          <code id="reset-reason">—</code>
+        </div>
+        <div>
+          <div class="muted">Uptime</div>
+          <code id="uptime">—</code>
+        </div>
+        <div>
+          <div class="muted">Heap libero</div>
+          <code id="free-heap">—</code>
+        </div>
+        <div>
+          <div class="muted">Heap minimo</div>
+          <code id="min-free-heap">—</code>
+        </div>
+        <div>
+          <div class="muted">Stack loop minimo</div>
+          <code id="loop-stack">—</code>
+        </div>
+        <div>
+          <div class="muted">Stack rete minimo</div>
+          <code id="network-stack">—</code>
+        </div>
+        <div>
+          <div class="muted">Schermata</div>
+          <code id="current-screen">—</code>
+        </div>
+        <div>
+          <div class="muted">Ciclo automatico</div>
+          <code id="cycle-state">—</code>
         </div>
       </div>
       <div class="status" id="info-status"></div>
@@ -322,6 +377,14 @@
     const mdnsEl = document.getElementById('mdns');
     const rssiEl = document.getElementById('rssi');
     const modeEl = document.getElementById('mode');
+    const resetReasonEl = document.getElementById('reset-reason');
+    const uptimeEl = document.getElementById('uptime');
+    const freeHeapEl = document.getElementById('free-heap');
+    const minFreeHeapEl = document.getElementById('min-free-heap');
+    const loopStackEl = document.getElementById('loop-stack');
+    const networkStackEl = document.getElementById('network-stack');
+    const currentScreenEl = document.getElementById('current-screen');
+    const cycleStateEl = document.getElementById('cycle-state');
     const oledCanvas = document.getElementById('oled');
     const oledCtx = oledCanvas.getContext('2d');
     const oledStatus = document.getElementById('oled-status');
@@ -363,6 +426,19 @@
       statusEl.textContent = msg;
     }
 
+    function formatBytes(value) {
+      return Number.isFinite(value) ? (value / 1024).toFixed(1) + ' KiB' : '—';
+    }
+
+    function formatUptime(ms) {
+      if (!Number.isFinite(ms)) return '—';
+      const totalMinutes = Math.floor(ms / 60000);
+      const days = Math.floor(totalMinutes / 1440);
+      const hours = Math.floor((totalMinutes % 1440) / 60);
+      const minutes = totalMinutes % 60;
+      return (days ? days + 'g ' : '') + hours + 'h ' + minutes + 'm';
+    }
+
     async function callEndpoint(path) {
       try {
         setStatus('Invio richiesta…');
@@ -394,6 +470,15 @@
         mdnsEl.textContent = j.mdns || '—';
         rssiEl.textContent = (j.rssi !== undefined ? j.rssi + ' dBm (' + (j.quality || 0) + '%)' : '—');
         modeEl.textContent = j.mode || '—';
+        resetReasonEl.textContent = j.reset_reason || '—';
+        uptimeEl.textContent = formatUptime(j.uptime_ms);
+        freeHeapEl.textContent = formatBytes(j.free_heap);
+        minFreeHeapEl.textContent = formatBytes(j.min_free_heap);
+        loopStackEl.textContent = formatBytes(j.loop_stack_min);
+        networkStackEl.textContent = formatBytes(j.network_stack_min);
+        const screenOption = screenOptionsFallback.find(option => option.id === j.screen);
+        currentScreenEl.textContent = screenOption ? screenOption.label : (j.screen ?? '—');
+        cycleStateEl.textContent = j.cycle ? 'Attivo' : 'Disattivo';
         const btnCycle = document.getElementById('btn-cycle');
         if (btnCycle) {
           const on = !!j.cycle;
