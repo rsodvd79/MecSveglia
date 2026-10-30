@@ -64,6 +64,39 @@ Caricamento firmware e filesystem
 - Firmware: compila e carica con PlatformIO (Upload)
 - File web: carica la partizione LittleFS con “Upload Filesystem Image” (**Nota: necessario ricaricare se si proviene da SPIFFS**)
 
+OTA e migrazione delle partizioni
+
+La flash da 4 MB contiene due slot firmware alternati e il filesystem SPIFFS
+(chiamato `LittleFS` dal codice):
+
+| Partizione | Offset | Dimensione |
+|---|---|---|
+| `app0` (`ota_0`) | `0x10000` | 1792 KiB |
+| `app1` (`ota_1`) | `0x1D0000` | 1792 KiB |
+| `spiffs` | `0x390000` | 448 KiB |
+
+**La prima migrazione dal vecchio layout con un solo slot richiede USB, non OTA.**
+Il filesystem cambia offset e passa da 2 MiB a 448 KiB:
+
+1. Prima di caricare qualsiasi immagine, salva privatamente il filesystem
+   attuale del dispositivo e recupera i file di configurazione aggiornati.
+   `/config` non include password e chiave meteo; i file locali potrebbero
+   essere meno recenti di quelli sul dispositivo. Non pubblicare credenziali.
+2. Prepara `data/` con pagine e configurazione da conservare. Non riscrivere il
+   vecchio backup raw da 2 MiB nel nuovo layout: ricostruisci l'immagine dai file.
+3. Esegui `pio run --target upload --upload-port <PORTA_USB>` per caricare
+   firmware, bootloader e nuova tabella delle partizioni.
+4. Esegui `pio run --target uploadfs --upload-port <PORTA_USB>` per caricare il
+   filesystem ricostruito. Verifica Wi-Fi e pagine prima degli OTA successivi.
+
+Non serve cancellare tutta la flash. Gli aggiornamenti ArduinoOTA successivi
+scrivono lo slot inattivo; non viene aggiunto rollback automatico. Gli OTA
+filesystem sovrascrivono pagine e configurazione: conserva sempre un backup.
+
+Su macOS ARM, se `buildfs` termina con `Bad CPU type in executable`, il pacchetto
+`tool-mkspiffs` installato contiene un eseguibile Intel: serve Rosetta oppure un
+`mkspiffs` nativo compatibile con ESP32 Arduino (metadata SPIFFS di 4 byte).
+
 Contenuti consigliati in `data/`
 
 - `INDEX.HTM` pagina principale (home)
@@ -93,4 +126,3 @@ Note
 - Il progetto abilita OTA: gli aggiornamenti possono essere inviati via rete quando il dispositivo è connesso.
 - Il display si attenua di notte (22:00–06:59) tramite `display.dim(true)`.
 - L'inversione periodica anti burn‑in è disabilitata.
-

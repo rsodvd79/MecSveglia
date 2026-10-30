@@ -9,7 +9,7 @@ class classMeteo {
 private:
 public:
   classMeteo();
-  void Update();
+  bool Update();
   float temp;
   int humidity;
   float wind_speed;

@@ -219,13 +219,13 @@ void classEye::moveBigEyeStep(int direction, unsigned long now) {
   target_eye->height += sign * OVERSIZE_AMOUNT;
   target_eye->width += sign * OVERSIZE_AMOUNT;
 
-  drawFrame();
   step++;
   if (step >= 12) {
     resetEyes(true);
     finishAnimation(now, 180);
     return;
   }
+  drawFrame();
   scheduleNext(now, 30);
 }
 

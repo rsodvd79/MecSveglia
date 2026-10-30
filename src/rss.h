@@ -1,10 +1,11 @@
 ﻿#pragma once
 
 #include <Arduino.h>
+#include "rss_parser.h"
 
 class classRss {
 public:
-    static constexpr size_t MAX_ITEMS = 5;
+    static constexpr size_t MAX_ITEMS = RssParser::MAX_ITEMS;
     static const char* const kDefaultCategory;
     static const char* const kCategories[];
     static const size_t kCategoryCount;
@@ -26,6 +27,7 @@ private:
     static String cleanupField(const String& input);
 
     String _category;
+    uint32_t _categoryRevision = 0;
     String _items[MAX_ITEMS];
     size_t _itemCount = 0;
     unsigned long _lastFetchMillis = 0;

@@ -4,6 +4,7 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <esp_task_wdt.h>
+#include "network_io.h"
 
 const char *const classRss::kDefaultCategory = "tecnologia";
 const char *const classRss::kCategories[] = {
@@ -52,9 +53,11 @@ bool classRss::refresh() {
   HTTPClient http;
 
   String url;
+  uint32_t revision;
   // Lock to safely read category
   if (lock()) {
     url = buildUrl(_category);
+    revision = _categoryRevision;
     unlock();
   } else {
     return false;
@@ -64,112 +67,43 @@ bool classRss::refresh() {
     return false;
   }
 
-  http.setConnectTimeout(5000);
-  http.setTimeout(5000);
+  configureFeedRequest(http);
   int code = http.GET();
-  if (code != HTTP_CODE_OK) {
+  if (code != HTTP_CODE_OK || !feedResponseIsReadable(http)) {
     http.end();
     return false;
   }
   esp_task_wdt_reset();
 
-  // Parse into local buffers — no mutex held during network I/O
-  String localItems[MAX_ITEMS];
-  size_t localCount = 0;
-
-  WiFiClient &stream = http.getStream();
-
-  String title = "";
-  bool insideItem = false;
-  bool insideTitle = false;
-  unsigned long parseStartMs = millis();
-  unsigned long lastWatchdogResetMs = parseStartMs;
-  // Must stay well below the task watchdog timeout (30 s): worst case here is
-  // ~PARSE_TIMEOUT_MS + http.setTimeout(5 s), which would otherwise trip it
-  static const unsigned long PARSE_TIMEOUT_MS = 15000UL;
-
-  while (http.connected() && (stream.available() || stream.connected())) {
-    if (millis() - lastWatchdogResetMs >= 1000UL) {
-      esp_task_wdt_reset();
-      lastWatchdogResetMs = millis();
-    }
-    if ((millis() - parseStartMs) > PARSE_TIMEOUT_MS) {
-      break;
-    }
-    if (!stream.available()) {
-      delay(1);
-      continue;
-    }
-
-    // Read until next tag start
-    String content = stream.readStringUntil('<');
-    if (insideTitle && insideItem) {
-      title += content;
-    }
-
-    char next = stream.peek();
-
-    if (next == '/') {
-      // Closing tag: </name>
-      stream.read(); // consume '/'
-      String tag = stream.readStringUntil('>');
-
-      if (tag.equalsIgnoreCase("title") && insideItem) {
-        insideTitle = false;
-        title = cleanupField(title);
-        if (title.length() > 0) {
-          if (title.length() > 96) {
-            title = title.substring(0, 93) + "...";
-          }
-          if (localCount < MAX_ITEMS) {
-            localItems[localCount++] = title;
-          }
-        }
-      } else if (tag.equalsIgnoreCase("item")) {
-        insideItem = false;
-        if (localCount >= MAX_ITEMS)
-          break;
-      }
-    } else if (next == '!' || next == '?') {
-      // Comment (<!--), DOCTYPE (<!DOCTYPE), XML PI (<?), or CDATA (<![CDATA[)
-      String tag = stream.readStringUntil('>');
-      // Capture CDATA content when inside a title element
-      if (tag.startsWith("![CDATA[") && insideTitle && insideItem) {
-        int cdataEnd = tag.indexOf("]]");
-        if (cdataEnd >= 0) {
-          title += tag.substring(8, cdataEnd);
-        } else {
-          title += tag.substring(8);
-        }
-      }
-    } else {
-      // Opening tag (possibly self-closing)
-      String tag = stream.readStringUntil('>');
-
-      // Self-closing tags (e.g. <br/>) — ignore
-      if (tag.endsWith("/")) {
-        // nothing to do
-      } else {
-        // Remove attributes if any
-        int space = tag.indexOf(' ');
-        if (space > 0)
-          tag = tag.substring(0, space);
-
-        if (tag.equalsIgnoreCase("item")) {
-          insideItem = true;
-          title = "";
-        } else if (tag.equalsIgnoreCase("title") && insideItem) {
-          insideTitle = true;
-          title = "";
-        }
-      }
-    }
+  FeedReader reader(http);
+  RssParser parser;
+  int c;
+  while (!parser.done() && (c = reader.read()) >= 0) {
+    parser.push(static_cast<char>(c));
+  }
+  http.end();
+  if (!parser.valid()) {
+    return false;
   }
 
-  http.end();
+  String localItems[MAX_ITEMS];
+  size_t localCount = 0;
+  for (size_t i = 0; i < parser.count(); ++i) {
+    String title = cleanupField(parser.title(i));
+    if (title.isEmpty()) continue;
+    if (title.length() > 96 || parser.truncated(i)) {
+      title = title.substring(0, 93) + "...";
+    }
+    localItems[localCount++] = title;
+  }
+  if (localCount == 0) return false;
 
   // Lock only to commit parsed results to shared state
   if (!lock()) {
+    return false;
+  }
+  if (revision != _categoryRevision) {
+    unlock();
     return false;
   }
   _itemCount = localCount;
@@ -228,7 +162,13 @@ String classRss::cleanupField(const String &input) {
 
 void classRss::setCategory(const String &category) {
   if (isValidCategory(category)) {
-    _category = normalizeCategory(category);
+    String normalized = normalizeCategory(category);
+    if (_category != normalized) {
+      _category = normalized;
+      ++_categoryRevision;
+      _itemCount = 0;
+      _lastFetchMillis = 0;
+    }
   }
 }
 

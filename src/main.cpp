@@ -32,6 +32,9 @@
 #include "meteo.h"
 #include "rss.h"
 #include "screen.h"
+#include "refresh_schedule.h"
+#include "web_template.h"
+#include "wifi_credentials.h"
 
 Adafruit_SSD1306 display(128, 32, &Wire, -1);
 
@@ -71,14 +74,11 @@ private:
 static esp8266::polledTimeout::periodicMs showTimeNow(250);
 static esp8266::polledTimeout::periodicMs showSTimeNow(500);
 static esp8266::polledTimeout::periodicMs showWifiNow(500);
-static esp8266::polledTimeout::periodicMs showEyesNow(125);
 static esp8266::polledTimeout::periodicMs showMeteoNow(1000 * 30);
-static esp8266::polledTimeout::periodicMs updateMeteoNow(30UL * 60 * 1000);
 static esp8266::polledTimeout::periodicMs showCicloScreenNow(1000 * 60);
 static esp8266::polledTimeout::periodicMs showGOLNow(80);
 static esp8266::polledTimeout::periodicMs showTriNow(60);
 static esp8266::polledTimeout::periodicMs showRssScrollNow(240);
-static esp8266::polledTimeout::periodicMs refreshRssNow(1000 * 60 * 60);
 static esp8266::polledTimeout::periodicMs wifiReconnectNow(1000 * 15);
 static esp8266::polledTimeout::periodicMs adjustBrightnessNow(1000 * 60);
 static esp8266::polledTimeout::periodicMs ensureTimeNow(1000 * 15);
@@ -93,6 +93,7 @@ static const uint32_t BTN_FLASH_DURATION    = 200; // ms
 static time_t lastSuccessfulSync = 0;
 static uint32_t lastTimeSyncAttemptMs = 0;
 static bool timeSyncedOnce = false;
+static std::atomic<bool> timeSyncCompleted{false};
 static const time_t MIN_VALID_EPOCH = 1672531200; // 2023-01-01T00:00:00Z
 static const time_t RESYNC_INTERVAL_SEC = 12 * 60 * 60;
 static const uint32_t SYNC_RETRY_INTERVAL_MS = 60 * 1000;
@@ -103,6 +104,8 @@ std::atomic<bool> forceRssRefresh{false};
 std::atomic<bool> forceMeteoRefresh{false};
 std::atomic<bool> needsMdnsRestart{false};
 std::atomic<bool> otaInProgress{false};
+static bool otaFilesystemUnmounted = false;
+static bool wifiConfigured = false;
 
 static esp_reset_reason_t bootResetReason = ESP_RST_UNKNOWN;
 
@@ -168,6 +171,9 @@ static const char *resetReasonName(esp_reset_reason_t reason) {
 
 // Network task function
 void networkTask(void *parameter) {
+  (void)parameter;
+  RefreshSchedule rssSchedule(60UL * 60 * 1000);
+  RefreshSchedule meteoSchedule(30UL * 60 * 1000);
   const esp_err_t wdtAddResult = esp_task_wdt_add(NULL);
   if (wdtAddResult != ESP_OK) {
     Serial.printf("[WDT] NetworkTask subscribe failed: %d\n", wdtAddResult);
@@ -194,14 +200,16 @@ void networkTask(void *parameter) {
       }
       // Update RSS
       const bool rssForced = forceRssRefresh.exchange(false);
-      if (refreshRssNow || rssForced) {
-        rss.refresh();
+      if (rssSchedule.due(millis(), rssForced)) {
+        const bool success = rss.refresh();
+        rssSchedule.completed(millis(), success);
         esp_task_wdt_reset();
       } else {
         // Avoid two consecutive TLS handshakes and their combined power peak.
         const bool meteoForced = forceMeteoRefresh.exchange(false);
-        if (updateMeteoNow || meteoForced) {
-          meteo.Update();
+        if (meteoSchedule.due(millis(), meteoForced)) {
+          const bool success = meteo.Update();
+          meteoSchedule.completed(millis(), success);
           esp_task_wdt_reset();
         }
       }
@@ -216,7 +224,7 @@ void networkTask(void *parameter) {
         }
       }
       // If stuck in AP mode with valid credentials, retry STA every 5 minutes
-      if (WiFi.getMode() == WIFI_AP && ssid.length() > 0 && password.length() > 0) {
+      if (WiFi.getMode() == WIFI_AP && wifiConfigured) {
         static unsigned long apStaRetryMs = 0;
         if (millis() - apStaRetryMs >= AP_STA_RETRY_MS) {
           apStaRetryMs = millis();
@@ -252,17 +260,14 @@ void handleRoot() {
   if (LittleFS.exists("/INDEX.HTM")) {
     File fhtm = LittleFS.open("/INDEX.HTM", "r");
     if (fhtm) {
-      String message = fhtm.readString();
+      server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+      server.send(200, F("text/html"), "");
+      streamIndexTemplate(fhtm, [](const char *data, size_t length) {
+        server.sendContent(data, length);
+      }, mdns_name.length() ? mdns_name.c_str() : "__MDNS__",
+         mdns_name.length() ? mdns_name.length() : 8);
+      server.sendContent("", 0);
       fhtm.close();
-
-      // Sostituzione dinamica di "mdns" con il contenuto di mdns_nm.txt /
-      // MDNS_NM.TXT
-      // Use cached mdns_name instead of reading file every time
-      if (mdns_name.length()) {
-        message.replace("__MDNS__", mdns_name);
-      }
-
-      server.send(200, F("text/html"), message);
       digitalWrite(LED_BUILTIN, HIGH);
       return;
     }
@@ -290,17 +295,17 @@ void handleRoot() {
 void handleNotFound() {
   digitalWrite(LED_BUILTIN, LOW);
 
-  String message = F("");
-
   if (LittleFS.exists("/M404.HTM")) {
     File fhtm = LittleFS.open("/M404.HTM", "r");
     if (fhtm) {
-      message = fhtm.readString();
+      server.streamFile(fhtm, F("text/html"), 404);
       fhtm.close();
+      digitalWrite(LED_BUILTIN, HIGH);
+      return;
     }
   }
 
-  server.send(404, F("text/html"), message);
+  server.send(404, F("text/html"), "");
   digitalWrite(LED_BUILTIN, HIGH);
 }
 
@@ -379,11 +384,7 @@ static void startTimeSync() {
 }
 
 void time_is_set_scheduled() {
-  time_t now = time(nullptr);
-  if (timeIsSane(now)) {
-    timeSyncedOnce = true;
-    lastSuccessfulSync = now;
-  }
+  timeSyncCompleted.store(true);
 }
 
 String normalizeTimezone(const String &tz) {
@@ -445,16 +446,24 @@ String jsonEscape(const String &input) {
 void applyTimezone() {
   setenv("TZ", timezonePosix.c_str(), 1);
   tzset();
-  configTzTime(timezonePosix.c_str(), "pool.ntp.org");
-  timezoneConfigured = true;
+  timeSyncCompleted.store(false);
   timeSyncedOnce = false;
   lastSuccessfulSync = 0;
+  configTzTime(timezonePosix.c_str(), "pool.ntp.org");
+  timezoneConfigured = true;
   startTimeSync();
 }
 
 static void maintainTimeSync() {
   if (!timezoneConfigured) {
     return;
+  }
+  if (timeSyncCompleted.exchange(false)) {
+    time_t synced = time(nullptr);
+    if (timeIsSane(synced)) {
+      timeSyncedOnce = true;
+      lastSuccessfulSync = synced;
+    }
   }
   if (WiFi.status() != WL_CONNECTED) {
     lastTimeSyncAttemptMs = 0;
@@ -486,7 +495,7 @@ static void maintainTimeSync() {
 }
 
 int dBmtoPercentage(int dBm) {
-  int RSSI_MAX = 0;    //-50 // define maximum strength of signal in dBm
+  int RSSI_MAX = -50;
   int RSSI_MIN = -100; // define minimum strength of signal in dBm
   int quality = 0;
 
@@ -637,70 +646,76 @@ void showScreen2() {
 }
 
 void showScreen3() {
-  if (!meteo.lock(100 / portTICK_PERIOD_MS))
+  if (!meteo.lock(0))
     return; // Try to lock, skip if busy
+  const float temp = meteo.temp;
+  const int humidity = meteo.humidity;
+  const float wind = meteo.wind_speed;
+  const float snow = meteo.snow;
+  const String description = meteo.description;
+  const String icon = meteo.icon;
+  meteo.unlock();
 
   display.clearDisplay();
   display.setCursor(0, 0);
   display.setTextSize(1);
   display.print(F("TEMP. "));
-  display.printf("%.1f", meteo.temp);
+  display.printf("%.1f", temp);
   display.println(F(" C"));
   display.print(F("UMID. "));
-  display.printf("%d", meteo.humidity);
+  display.printf("%d", humidity);
   display.println(F(" %"));
   display.print(F("VENTO "));
-  display.printf("%.1f", meteo.wind_speed);
+  display.printf("%.1f", wind);
   display.println(F(" m/s"));
-  display.print(meteo.description);
+  display.print(description);
 
-  if (meteo.icon == F("01D")) { // clear sky
+  if (icon == F("01D")) { // clear sky
     display.drawBitmap(128 - 32, 0, Sun, 32, 32, 1);
 
-  } else if (meteo.icon == F("01N")) { // clear sky
+  } else if (icon == F("01N")) { // clear sky
     display.drawBitmap(128 - 32, 0, Moon, 32, 32, 1);
 
-  } else if (meteo.icon == F("02D")) { // few clouds
+  } else if (icon == F("02D")) { // few clouds
     display.drawBitmap(128 - 32, 0, CloudyDay, 32, 32, 1);
 
-  } else if (meteo.icon == F("02N")) { // few clouds
+  } else if (icon == F("02N")) { // few clouds
     display.drawBitmap(128 - 32, 0, CloudyNight, 32, 32, 1);
 
-  } else if (meteo.icon == F("03D") ||
-             meteo.icon == F("03N")) { // scattered clouds
+  } else if (icon == F("03D") ||
+             icon == F("03N")) { // scattered clouds
     display.drawBitmap(128 - 32, 0, Clouds, 32, 32, 1);
 
-  } else if (meteo.icon == F("04D") ||
-             meteo.icon == F("04N")) { // broken clouds
+  } else if (icon == F("04D") ||
+             icon == F("04N")) { // broken clouds
     display.drawBitmap(128 - 32, 0, Clouds, 32, 32, 1);
 
-  } else if (meteo.icon == F("09D") || meteo.icon == F("09N")) { // shower rain
+  } else if (icon == F("09D") || icon == F("09N")) { // shower rain
     display.drawBitmap(128 - 32, 0, Downpour, 32, 32, 1);
 
-  } else if (meteo.icon == F("10D") || meteo.icon == F("10N")) { // rain
+  } else if (icon == F("10D") || icon == F("10N")) { // rain
     display.drawBitmap(128 - 32, 0, Rain, 32, 32, 1);
 
-  } else if (meteo.icon == F("11D") || meteo.icon == F("11N")) { // thunderstorm
+  } else if (icon == F("11D") || icon == F("11N")) { // thunderstorm
     display.drawBitmap(128 - 32, 0, Storm, 32, 32, 1);
 
-  } else if (meteo.icon == F("13D") || meteo.icon == F("13N")) { // snow
+  } else if (icon == F("13D") || icon == F("13N")) { // snow
     display.print(F(" "));
-    display.printf("%.1f", meteo.snow);
+    display.printf("%.1f", snow);
     display.print(F(" mm/h"));
     display.drawBitmap(128 - 32, 0, Snow, 32, 32, 1);
 
-  } else if (meteo.icon == F("50D")) { // mist
+  } else if (icon == F("50D")) { // mist
     display.drawBitmap(128 - 32, 0, FogDay, 32, 32, 1);
 
-  } else if (meteo.icon == F("50N")) { // mist
+  } else if (icon == F("50N")) { // mist
     display.drawBitmap(128 - 32, 0, FogNight, 32, 32, 1);
 
-  } else if (meteo.icon == F("ERR")) { // mist
+  } else if (icon == F("ERR")) { // mist
     display.drawBitmap(128 - 32, 0, MeteoErr, 32, 32, 1);
   }
 
   display.display();
-  meteo.unlock();
 }
 
 void showScreen4() {
@@ -822,8 +837,8 @@ void showScreen7() {
   static int dx = 1, dy = 1; // pixels per tick
   const int W = display.width();
   const int H = display.height();
-  const String txt = F("CICLO");
-  const int tw = txt.length() * 6 * 2; // 6 px per char at size=1, times 2
+  const char *txt = "CICLO";
+  const int tw = 5 * 6 * 2; // 6 px per char at size=1, times 2
   const int th = 8 * 2;                // 8 px glyph height at size=1, times 2
   const int maxX = (W > tw) ? (W - tw) : 0;
   const int maxY = (H > th) ? (H - th) : 0;
@@ -862,14 +877,22 @@ void showScreen7() {
   display.display();
 }
 void showScreen6() {
-  if (!rss.lock(100 / portTICK_PERIOD_MS))
-    return; // Try to lock
-
-  const size_t count = rss.itemCount();
   static float scrollOffset = 0.0f;
   static size_t topIndex = 0;
   static size_t cachedCount = 0;
   static unsigned long cachedStamp = 0;
+  static String headlines[classRss::MAX_ITEMS];
+
+  if (!rss.lock(0)) return;
+  const size_t count = rss.itemCount();
+  const unsigned long stamp = rss.lastFetchMillis();
+  const bool changed = count != cachedCount || stamp != cachedStamp;
+  if (changed) {
+    for (size_t i = 0; i < count; ++i) {
+      headlines[i] = rss.item(i);
+    }
+  }
+  rss.unlock();
 
   if (count == 0) {
     topIndex = 0;
@@ -882,14 +905,13 @@ void showScreen6() {
     display.print(F("RSS vuoto"));
     display.display();
     display.setTextWrap(true); // restore default for other screens
-    rss.unlock(); // Ensure unlock
     return;
   }
 
   // Reset if content changes
-  if (count != cachedCount || rss.lastFetchMillis() != cachedStamp) {
+  if (changed) {
     cachedCount = count;
-    cachedStamp = rss.lastFetchMillis();
+    cachedStamp = stamp;
     topIndex = 0;
     scrollOffset = 0.0f;
   }
@@ -909,9 +931,7 @@ void showScreen6() {
 
   // Draw items until we fill the screen
   while (y < displayH && drawnItems < count + 1) {
-    String headline = rss.item(itemIndex);
-    if (headline.length() == 0)
-      headline = F("...");
+    const String &headline = headlines[itemIndex];
 
     // Calculate lines needed
     int lines = (headline.length() + charsPerLine - 1) / charsPerLine;
@@ -930,7 +950,8 @@ void showScreen6() {
           end = headline.length();
 
         display.setCursor(0, lineY);
-        display.print(headline.substring(start, end));
+        display.write(reinterpret_cast<const uint8_t *>(headline.c_str() + start),
+                      end - start);
       }
     }
 
@@ -944,7 +965,7 @@ void showScreen6() {
 
   // Update scrolling
   // Calculate height of the top item to know when to switch
-  String topHeadline = rss.item(topIndex);
+  const String &topHeadline = headlines[topIndex];
   int topLines = (topHeadline.length() + charsPerLine - 1) / charsPerLine;
   if (topLines < 1)
     topLines = 1;
@@ -961,7 +982,6 @@ void showScreen6() {
     topIndex = (topIndex + 1) % count; // Move to next item
   }
 
-  rss.unlock();
 }
 
 void renderScreenNow(unsigned int s) {
@@ -1021,7 +1041,7 @@ void setup(void) {
 
   screen.RowClear();
   AddScreenRows(String(F("RESET: ")) + resetReasonName(bootResetReason));
-  bool wifiConfigured = true;
+  wifiConfigured = true;
   rss.begin();
   String rssCategory = classRss::kDefaultCategory;
   bool rssCategoryDirty = false;
@@ -1053,8 +1073,12 @@ void setup(void) {
       File fsid = LittleFS.open("/WIFI_SID.TXT", "r");
       if (fsid) {
         AddScreenRows(F("FILE WIFI_SID.TXT OK"));
-        ssid = fsid.readString();
-        ssid.trim();
+        if (fsid.size() <= 34) {
+          ssid = fsid.readString();
+          ssid.remove(credentialTextLength(ssid.c_str(), ssid.length()));
+        } else {
+          wifiConfigured = false;
+        }
         fsid.close();
       } else {
         AddScreenRows(F("FILE WIFI_SID.TXT KO"));
@@ -1068,8 +1092,12 @@ void setup(void) {
       File fpwd = LittleFS.open("/WIFI_PWD.TXT", "r");
       if (fpwd) {
         AddScreenRows(F("FILE WIFI_PWD.TXT OK"));
-        password = fpwd.readString();
-        password.trim();
+        if (fpwd.size() <= 66) {
+          password = fpwd.readString();
+          password.remove(credentialTextLength(password.c_str(), password.length()));
+        } else {
+          wifiConfigured = false;
+        }
         fpwd.close();
       } else {
         AddScreenRows(F("FILE WIFI_PWD.TXT KO"));
@@ -1111,9 +1139,9 @@ void setup(void) {
         AddScreenRows(F("FILE RSS.TXT OK"));
         String rawCat = frss.readString();
         frss.close();
-        String normalizedCat = classRss::normalizeCategory(rawCat);
-        if (classRss::isValidCategory(normalizedCat)) {
-          rssCategory = normalizedCat;
+        rawCat.trim();
+        if (classRss::isValidCategory(rawCat)) {
+          rssCategory = classRss::normalizeCategory(rawCat);
         } else {
           AddScreenRows(F("RSS.TXT categoria KO"));
           rssCategory = classRss::kDefaultCategory;
@@ -1157,7 +1185,10 @@ void setup(void) {
   delay(500);
 
   // decide network mode
-  if (wifiConfigured && ssid.length() > 0 && password.length() > 0) {
+  wifiConfigured = wifiConfigured &&
+      validWifiCredentials(ssid.c_str(), ssid.length(),
+                           password.c_str(), password.length());
+  if (wifiConfigured) {
     WiFi.mode(WIFI_STA);
     WiFi.setTxPower(STA_TX_POWER);
     // Avoid auto-reconnect loops while we manage fallback
@@ -1357,9 +1388,10 @@ void setup(void) {
     display.setCursor(0, 0);
     display.println(F("Start updating "));
 
-    if (ArduinoOTA.getCommand() == U_FLASH) {
+    otaFilesystemUnmounted = ArduinoOTA.getCommand() == U_SPIFFS;
+    if (!otaFilesystemUnmounted) {
       display.println(F("sketch"));
-    } else { // U_FS
+    } else {
       display.println(F("filesystem"));
       LittleFS.end();
     }
@@ -1371,6 +1403,7 @@ void setup(void) {
 
   ArduinoOTA.onEnd([]() {
     otaInProgress = false;
+    otaFilesystemUnmounted = false;
     digitalWrite(LED_BUILTIN, HIGH);
     display.setTextSize(1);
     display.clearDisplay();
@@ -1381,6 +1414,8 @@ void setup(void) {
   });
 
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    // ArduinoOTA.handle() runs the whole transfer in the subscribed loop task.
+    esp_task_wdt_reset();
     unsigned int pct =
         (total > 0) ? (unsigned int)(((unsigned long)progress * 100UL) / total)
                     : 0;
@@ -1396,6 +1431,10 @@ void setup(void) {
   });
 
   ArduinoOTA.onError([](ota_error_t error) {
+    if (otaFilesystemUnmounted && !LittleFS.begin(false)) {
+      Serial.println(F("[OTA] Filesystem remount failed"));
+    }
+    otaFilesystemUnmounted = false;
     otaInProgress = false;
     digitalWrite(LED_BUILTIN, HIGH);
     display.setTextSize(1);
@@ -1495,13 +1534,11 @@ void loop(void) {
   static bool btnPendingNav = false;
   if (Bottone.Pressed() && btnFlashEndMs == 0) {
     display.invertDisplay(true);
-    display.display();
     btnFlashEndMs = millis() + BTN_FLASH_DURATION;
     btnPendingNav = true;
   }
   if (btnFlashEndMs > 0 && (long)(millis() - btnFlashEndMs) >= 0) {
     display.invertDisplay(false);
-    display.display();
     btnFlashEndMs = 0;
     if (btnPendingNav) {
       btnPendingNav = false;
@@ -1532,9 +1569,7 @@ void loop(void) {
     }
     break;
   case 2:
-    if (showEyesNow) {
-      showScreen2();
-    }
+    showScreen2();
     break;
   case 3:
     if (showMeteoNow) {
@@ -1579,9 +1614,8 @@ void handleSetupGet() {
   if (LittleFS.exists("/SETUP.HTM")) {
     File fhtm = LittleFS.open("/SETUP.HTM", "r");
     if (fhtm) {
-      String message = fhtm.readString();
+      server.streamFile(fhtm, F("text/html"));
       fhtm.close();
-      server.send(200, F("text/html"), message);
       digitalWrite(LED_BUILTIN, HIGH);
       return;
     }
@@ -1610,28 +1644,36 @@ void handleSetupGet() {
 }
 
 void handleSetupPost() {
-  String nsid = server.hasArg("ssid") ? server.arg("ssid") : String("");
-  nsid.trim();
-  if (nsid.length() > 31) nsid = nsid.substring(0, 31);
-  String npwd = server.hasArg("pwd") ? server.arg("pwd") : String("");
-  npwd.trim();
+  String nsid = server.hasArg("ssid") ? server.arg("ssid") : ssid;
+  String npwd = server.hasArg("pwd") ? server.arg("pwd") : password;
   String nmdn = server.hasArg("mdns") ? server.arg("mdns") : String("");
   nmdn.trim();
+  if ((server.hasArg("ssid") || server.hasArg("pwd")) &&
+      !validWifiCredentials(nsid.c_str(), nsid.length(),
+                            npwd.c_str(), npwd.length())) {
+    server.send(400, F("text/plain"), F("Credenziali Wi-Fi non valide"));
+    return;
+  }
   bool ok = true;
   if (!LittleFS.begin())
     ok = false;
-  if (ok && nsid.length()) {
+  if (ok && server.hasArg("ssid") && !server.hasArg("pwd") &&
+      !LittleFS.exists("/WIFI_PWD.TXT")) {
+    server.send(400, F("text/plain"), F("Parametro pwd mancante"));
+    return;
+  }
+  if (ok && server.hasArg("ssid")) {
     File f = LittleFS.open("/WIFI_SID.TXT", "w");
     if (f) {
-      f.print(nsid);
+      ok = f.print(nsid) == nsid.length();
       f.close();
     } else
       ok = false;
   }
-  if (ok && npwd.length()) {
+  if (ok && server.hasArg("pwd")) {
     File f = LittleFS.open("/WIFI_PWD.TXT", "w");
     if (f) {
-      f.print(npwd);
+      ok = f.print(npwd) == npwd.length();
       f.close();
     } else
       ok = false;
@@ -1639,7 +1681,7 @@ void handleSetupPost() {
   if (ok && nmdn.length()) {
     File f = LittleFS.open("/MDNS_NM.TXT", "w");
     if (f) {
-      f.print(nmdn);
+      ok = f.print(nmdn) == nmdn.length();
       f.close();
     } else
       ok = false;
@@ -1709,13 +1751,21 @@ void handleScreenStartPost() {
   server.send(200, F("application/json"), json);
 }
 void handleRssGet() {
-  if (!rss.lock(1000 / portTICK_PERIOD_MS)) {
+  if (!rss.lock(pdMS_TO_TICKS(10))) {
     server.send(503, F("text/plain"), F("Server busy"));
     return;
   }
 
-  String json = F("{\"category\":\"");
-  json += jsonEscape(rss.category());
+  const String category = rss.category();
+  const size_t count = rss.itemCount();
+  String items[classRss::MAX_ITEMS];
+  for (size_t i = 0; i < count; ++i) items[i] = rss.item(i);
+  rss.unlock();
+
+  String json;
+  json.reserve(768);
+  json = F("{\"category\":\"");
+  json += jsonEscape(category);
   json += F("\",\"categories\":[");
   for (size_t i = 0; i < classRss::kCategoryCount; ++i) {
     if (i)
@@ -1725,17 +1775,15 @@ void handleRssGet() {
     json += '\"';
   }
   json += F("],\"items\":[");
-  size_t count = rss.itemCount();
   for (size_t i = 0; i < count; ++i) {
     if (i)
       json += ',';
     json += '\"';
-    json += jsonEscape(rss.item(i));
+    json += jsonEscape(items[i]);
     json += '\"';
   }
   json += F("]}");
 
-  rss.unlock();
   server.send(200, F("application/json"), json);
 }
 
@@ -1746,11 +1794,11 @@ void handleRssPost() {
   }
 
   const String rawCat = server.arg("category");
-  String requested = classRss::normalizeCategory(rawCat);
-  if (requested == classRss::kDefaultCategory && !rawCat.equalsIgnoreCase(classRss::kDefaultCategory)) {
+  if (!classRss::isValidCategory(rawCat)) {
     server.send(400, F("text/plain"), F("Categoria non valida"));
     return;
   }
+  String requested = classRss::normalizeCategory(rawCat);
 
   // Mount filesystem before any state change — failure leaves in-memory state intact
   if (!LittleFS.begin(false)) {
@@ -1764,10 +1812,14 @@ void handleRssPost() {
     server.send(500, F("text/plain"), F("Errore scrittura RSS"));
     return;
   }
-  f.print(requested);
+  const bool written = f.print(requested) == requested.length();
   f.close();
+  if (!written) {
+    server.send(500, F("text/plain"), F("Errore scrittura RSS"));
+    return;
+  }
 
-  if (!rss.lock(1000 / portTICK_PERIOD_MS)) {
+  if (!rss.lock(pdMS_TO_TICKS(10))) {
     server.send(503, F("text/plain"), F("Server busy"));
     return;
   }
@@ -1857,6 +1909,8 @@ void handleStatus() {
   json += ESP.getFreeHeap();
   json += F(",\"min_free_heap\":");
   json += ESP.getMinFreeHeap();
+  json += F(",\"max_alloc_heap\":");
+  json += ESP.getMaxAllocHeap();
   json += F(",\"loop_stack_min\":");
   json += uxTaskGetStackHighWaterMark(NULL);
   json += F(",\"network_stack_min\":");

@@ -3,41 +3,64 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>FURGONE • Setup Wi‑Fi</title>
+  <title>MecSveglia • Configurazione Wi-Fi</title>
   <style>
     * { box-sizing: border-box; }
-    :root { --bg:#0f172a; --panel:#111827; --text:#e5e7eb; --muted:#9ca3af; --accent:#22c55e; }
-    html, body { margin:0; padding:0; background:var(--bg); color:var(--text); font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', Arial, 'Noto Sans'; }
-    .wrap { max-width: 720px; margin: 0 auto; padding: 24px 16px; }
-    h1 { font-size: 20px; margin: 0 0 12px 0; }
-    .card { background: var(--panel); border:1px solid #1f2937; border-radius:12px; padding:16px; }
-    label { display:block; margin: 10px 0 6px; color: var(--muted); font-size: 13px; }
-    input { width:100%; max-width:100%; padding:10px 12px; border-radius:10px; border:1px solid #1f2937; background:#0b1220; color:var(--text); font-size: 15px; }
-    button { margin-top:14px; border:0; border-radius:10px; background:var(--accent); color:#052e16; font-weight:600; padding:12px 14px; cursor:pointer; }
+    :root { color-scheme:dark; --bg:#0b1118; --panel:#131d28; --text:#edf4fa; --muted:#a4b4c6; --accent:#74e2cd; }
+    body { margin:0; background:var(--bg); background-image:radial-gradient(ellipse at 90% 0, #16322f 0, transparent 65%); color:var(--text); font:15px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+    .wrap { max-width:560px; margin:auto; padding:32px 24px 40px; }
+    .brand { display:flex; align-items:center; gap:12px; margin-bottom:32px; font-size:13px; font-weight:750; letter-spacing:.14em; }
+    .brand-mark { display:grid; place-items:center; width:38px; height:38px; border-radius:12px; background:var(--accent); color:#102b28; font-size:24px; letter-spacing:-.08em; }
+    .eyebrow { color:var(--accent); font-size:11px; font-weight:700; letter-spacing:.16em; text-transform:uppercase; }
+    h1 { font-size:clamp(30px, 6vw, 40px); line-height:1.15; letter-spacing:-.04em; margin:12px 0; }
+    h1 span { color:var(--accent); }
+    p { margin:0; color:var(--muted); }
+    .card { margin-top:26px; background:linear-gradient(135deg, #172431, var(--panel)); border:1px solid #2b3b4b; border-radius:22px; padding:28px; }
+    label { display:block; margin:20px 0 8px; color:var(--text); font-size:13px; font-weight:600; }
+    label:first-child { margin-top:0; }
+    input { width:100%; min-width:0; min-height:48px; padding:12px; border-radius:11px; border:1px solid #415264; background:#0e1822; color:var(--text); font:16px system-ui, sans-serif; }
+    input::placeholder { color:#92a4b7; opacity:1; }
+    button { width:100%; min-height:48px; margin-top:24px; border:1px solid var(--accent); border-radius:12px; background:var(--accent); color:#102b28; font:700 14px system-ui, sans-serif; padding:13px 16px; cursor:pointer; }
+    button:hover { background:#a1eedf; }
+    :where(a, input, button):focus-visible { outline:3px solid var(--accent); outline-offset:4px; }
     .hint { color:var(--muted); font-size:12px; margin-top:8px; }
-    a { color:#93c5fd; text-decoration:none; }
+    .notice { margin-top:20px; padding:16px 18px; border-left:2px solid #74e2cd; border-radius:0 12px 12px 0; background:#132a2b; }
+    .notice strong { display:block; color:var(--accent); font-size:12px; margin-bottom:4px; }
+    .back { display:inline-flex; align-items:center; min-height:44px; margin-top:16px; font-size:13px; }
+    a { color:var(--accent); text-underline-offset:4px; }
+    @media (max-width:400px) { .wrap { padding:24px 16px; } .card { padding:22px 18px; } }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <h1>Configurazione Wi‑Fi</h1>
-    <div class="card">
+    <header class="brand"><span class="brand-mark" aria-hidden="true">m.</span> MECSVEGLIA</header>
+    <main>
+    <span class="eyebrow">Rete e connessione</span>
+    <h1>Connetti la tua<br><span>MecSveglia.</span></h1>
+    <p>Una rete Wi-Fi e sei pronto. Le tue impostazioni restano sul dispositivo.</p>
+    <section class="card" aria-label="Configurazione della rete Wi-Fi">
       <form method="post" action="/setup">
-        <label for="ssid">SSID</label>
+        <label for="ssid">Nome della rete Wi-Fi</label>
         <input id="ssid" name="ssid" type="text" required placeholder="Nome rete Wi‑Fi">
 
         <label for="pwd">Password</label>
         <input id="pwd" name="pwd" type="password" placeholder="Password">
+        <p class="hint">Reinserisci la password: non viene mostrata per sicurezza. Per una rete aperta, lascia vuoto.</p>
 
         <label for="mdns">Nome mDNS (opzionale)</label>
-        <input id="mdns" name="mdns" type="text" placeholder="FURGONE">
+        <input id="mdns" name="mdns" type="text" placeholder="MECSVEGLIA">
+        <p class="hint">Il nome con cui ritrovi la sveglia sulla tua rete: nome.local</p>
 
         <button type="submit">Salva e riavvia</button>
         <div class="hint">Dopo il riavvio, il dispositivo proverà a connettersi alla rete indicata.</div>
       </form>
-    </div>
-    <p class="hint" style="margin-top:12px;">Se sei in modalità Access Point, connettiti alla rete con SSID uguale al nome mDNS del dispositivo.</p>
-    <p class="hint"><a href="/">Torna alla Home</a></p>
+    </section>
+    <aside class="notice">
+      <strong>Prima connessione?</strong>
+      <p class="hint">In modalità Access Point, connettiti alla rete Wi-Fi con lo stesso nome mDNS della sveglia, poi imposta qui la tua rete.</p>
+    </aside>
+    <a class="back" href="/">← Torna al pannello di controllo</a>
+    </main>
   </div>
   <script>
     // Carica le impostazioni correnti (SSID e mDNS) senza esporre la password
@@ -57,4 +80,3 @@
   </script>
 </body>
 </html>
-

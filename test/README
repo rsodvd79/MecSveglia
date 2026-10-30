@@ -1,11 +1,22 @@
 
-This directory is intended for PlatformIO Test Runner and project tests.
+Run from the repository root:
 
-Unit Testing is a software testing method by which individual units of
-source code, sets of one or more MCU program modules together with associated
-control data, usage procedures, and operating procedures, are tested to
-determine whether they are fit for use. Unit testing finds problems early
-in the development cycle.
+    pio run
+    sh test/run_host_tests.sh
 
-More information about PlatformIO Unit Testing:
-- https://docs.platformio.org/en/latest/advanced/unit-testing/index.html
+The host regressions require Python 3 and a C++11 compiler with AddressSanitizer
+and UndefinedBehaviorSanitizer. They reuse ArduinoJson installed by PlatformIO.
+No ESP32 connection or upload is required.
+
+The checks compile the production RSS, meteo and eyes modules and the actual
+setup/SNTP/OTA handler bodies against small host stubs. They cover bounded input,
+deadlines, cache preservation, category changes, retry/rollover scheduling,
+frame timing, streaming HTML substitution, credentials and filesystem recovery.
+They do not measure real heap fragmentation, task stack margins, I2C latency,
+TLS/radio behavior or OTA on hardware.
+
+Validate OTA slot alignment, overlap, flash limits and built image capacity:
+
+    pio run
+    pio run --target buildfs
+    python3 test/check_ota_layout.py

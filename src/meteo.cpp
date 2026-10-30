@@ -1,101 +1,84 @@
 #include "meteo.h"
-#include <HTTPClient.h>
-#include <WiFiClientSecure.h>
+#include "network_io.h"
 #include <ArduinoJson.h>
+#include <WiFiClientSecure.h>
+#include <math.h>
 
 classMeteo::classMeteo() {
-	temp = 0;
-	humidity = 0;
-	wind_speed = 0;
-	description = "";
-	icon = "";
-	snow = 0;
-    _mutex = xSemaphoreCreateMutex();
+  temp = 0;
+  humidity = 0;
+  wind_speed = 0;
+  description = "";
+  icon = "";
+  snow = 0;
+  _mutex = xSemaphoreCreateMutex();
 }
 
-void classMeteo::Update() {
-	WiFiClientSecure client;
-	client.setInsecure();
-	client.setHandshakeTimeout(5);
-	HTTPClient http;
+bool classMeteo::Update() {
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setHandshakeTimeout(5);
+  HTTPClient http;
+  String url = F("https://api.openweathermap.org/data/2.5/weather?");
+  if (!url.concat(Api) || !http.begin(client, url)) {
+    return false;
+  }
 
-	String URL = F("https://api.openweathermap.org/data/2.5/weather?");
+  configureFeedRequest(http);
+  if (http.GET() != HTTP_CODE_OK || !feedResponseIsReadable(http)) {
+    http.end();
+    return false;
+  }
 
-	if (URL.concat(Api) && http.begin(client, URL)) {
-		http.setConnectTimeout(5000);
-		http.setTimeout(5000);
-		int httpCode = http.GET();
+  StaticJsonDocument<512> json;
+  StaticJsonDocument<JSON_OBJECT_SIZE(4) + JSON_OBJECT_SIZE(2) +
+                     JSON_OBJECT_SIZE(1) + JSON_ARRAY_SIZE(1) +
+                     JSON_OBJECT_SIZE(2) + JSON_OBJECT_SIZE(1)> filter;
+  filter["main"]["temp"] = true;
+  filter["main"]["humidity"] = true;
+  filter["wind"]["speed"] = true;
+  filter["weather"][0]["description"] = true;
+  filter["weather"][0]["icon"] = true;
+  filter["snow"]["1h"] = true;
+  FeedReader reader(http);
+  DeserializationError error =
+      deserializeJson(json, reader, DeserializationOption::Filter(filter));
+  http.end();
+  if (error || !json["main"]["temp"].is<float>() ||
+      !json["main"]["humidity"].is<int>() ||
+      !json["wind"]["speed"].is<float>() ||
+      !json["weather"][0]["description"].is<const char *>() ||
+      !json["weather"][0]["icon"].is<const char *>()) {
+    return false;
+  }
 
-		if (httpCode > 0) {
-			if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_MOVED_PERMANENTLY) {
+  const float newTemp = json["main"]["temp"];
+  const int newHumidity = json["main"]["humidity"];
+  const float newWind = json["wind"]["speed"];
+  String newDescription = json["weather"][0]["description"].as<const char *>();
+  String newIcon = json["weather"][0]["icon"].as<const char *>();
+  float newSnow = 0;
+  if (!isfinite(newTemp) || !isfinite(newWind) || newWind < 0 ||
+      newHumidity < 0 || newHumidity > 100 || newIcon.length() != 3 ||
+      (newIcon[2] != 'd' && newIcon[2] != 'n') ||
+      !isDigit(newIcon[0]) || !isDigit(newIcon[1])) {
+    return false;
+  }
+  if (!json["snow"]["1h"].isNull()) {
+    if (!json["snow"]["1h"].is<float>()) return false;
+    newSnow = json["snow"]["1h"];
+    if (!isfinite(newSnow) || newSnow < 0) return false;
+  }
+  newDescription.toUpperCase();
+  newIcon.toUpperCase();
 
-				StaticJsonDocument<512> jsonBuffer;
-				// Filter only required fields to reduce memory usage.
-				// Dimensione calcolata: 12 nodi * 16 bytes/nodo + 8 overhead ~= 200 bytes.
-				StaticJsonDocument<256> filter;
-				filter[F("main")][F("temp")] = true;
-				filter[F("main")][F("humidity")] = true;
-				filter[F("wind")][F("speed")] = true;
-				filter[F("weather")][0][F("description")] = true;
-				filter[F("weather")][0][F("icon")] = true;
-				filter[F("snow")][F("1h")] = true;
-				DeserializationError error = deserializeJson(jsonBuffer, http.getStream(), DeserializationOption::Filter(filter));
-
-                if (!lock()) {
-                    http.end();
-                    return;
-                }
-
-				if (error) {
-					description = error.c_str();
-					icon = String(F("ERR"));
-
-				}
-				else {
-					temp = (float)(jsonBuffer[F("main")][F("temp")]);
-					humidity = jsonBuffer[F("main")][F("humidity")];
-					wind_speed = jsonBuffer[F("wind")][F("speed")];
-					
-					String d = jsonBuffer[F("weather")][0][F("description")];
-					description = (d == F("null") || d.isEmpty()) ? F("") : d;
-					description.toUpperCase();
-
-					String i = jsonBuffer[F("weather")][0][F("icon")];
-					icon = (i == F("null") || i.isEmpty()) ? F("ERR") : i;
-					icon.toUpperCase();
-
-					if (icon == "13D" || icon == "13N") { // snow
-						snow = (float)jsonBuffer[F("snow")][F("1h")];
-					}
-					else {
-						snow = 0;
-					}
-				}
-                unlock();
-
-			}
-			else {
-                if (lock()) {
-				    icon = String(F("ERR"));
-                    unlock();
-                }
-			}
-		}
-		else {
-            if (lock()) {
-			    icon = String(F("ERR"));
-                unlock();
-            }
-		}
-
-		http.end();
-
-	}
-	else {
-        if (lock()) {
-		    icon = String(F("ERR"));
-            unlock();
-        }
-	}
-
+  if (!lock()) return false;
+  temp = newTemp;
+  humidity = newHumidity;
+  wind_speed = newWind;
+  description = newDescription;
+  icon = newIcon;
+  snow = newSnow;
+  unlock();
+  return true;
 }
